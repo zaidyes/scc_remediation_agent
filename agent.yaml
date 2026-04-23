@@ -22,6 +22,8 @@ tools:
     module: app/tools/scc_tools.py
   - name: query_blast_radius
     module: app/tools/graph_tools.py
+  - name: query_dependency_chain
+    module: app/tools/graph_tools.py
   - name: query_iam_paths
     module: app/tools/graph_tools.py
   - name: check_dormancy

@@ -1,7 +1,7 @@
 from google.adk.agents import Agent
 
 from app.tools.scc_tools import get_finding_detail, mute_resolved_finding
-from app.tools.graph_tools import query_blast_radius, query_iam_paths, check_dormancy
+from app.tools.graph_tools import query_blast_radius, query_iam_paths, check_dormancy, query_dependency_chain
 from app.tools.network_tools import get_network_exposure
 from app.tools.osconfig_tools import create_patch_job
 from app.tools.approval_tools import dispatch_approval_request
@@ -26,11 +26,12 @@ root_agent = Agent(
     tools=[
         get_finding_detail,
         query_blast_radius,
+        query_dependency_chain,
         query_iam_paths,
         check_dormancy,
         get_network_exposure,
         create_patch_job,
         dispatch_approval_request,
-        mute_resolved_finding
+        mute_resolved_finding,
     ],
 )

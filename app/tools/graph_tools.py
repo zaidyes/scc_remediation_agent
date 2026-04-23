@@ -73,6 +73,59 @@ def query_blast_radius(asset_name: str, max_hops: int = 3) -> list[dict]:
     )
     return rows
 
+def query_dependency_chain(asset_name: str, max_hops: int = 3) -> dict:
+    """
+    Returns upstream dependency analysis for the asset — what it depends on,
+    what other resources share those same dependencies, and its SA privilege chain.
+    Used by the plan agent to assess change risk before generating a remediation plan.
+    """
+    upstream = _run_query(
+        f"MATCH path = (target:Resource {{asset_name: $asset_name}})"
+        f"-[:DEPENDS_ON|HOSTED_BY|USES_SERVICE_ACCOUNT*1..{max_hops}]->(upstream:Resource) "
+        f"RETURN upstream.asset_name AS name, upstream.asset_type AS asset_type, "
+        f"upstream.short_name AS short_name, upstream.env AS env, upstream.team AS team, "
+        f"upstream.data_class AS data_class, upstream.status AS status, "
+        f"upstream.dormancy_score AS dormancy_score, length(path) AS depth, "
+        f"[r IN relationships(path) | type(r)] AS relationship_types, "
+        f"[r IN relationships(path) | r.dependency_type] AS dependency_subtypes, "
+        f"CASE WHEN upstream.env = 'prod' OR upstream.data_class IN ['pii','restricted'] "
+        f"THEN 'HIGH' WHEN upstream.env = 'staging' THEN 'MEDIUM' ELSE 'LOW' END AS upstream_criticality "
+        f"ORDER BY depth ASC, upstream_criticality DESC",
+        {"asset_name": asset_name},
+    )
+
+    shared = _run_query(
+        "MATCH (target:Resource {asset_name: $asset_name})"
+        "-[:DEPENDS_ON|HOSTED_BY*1..2]->(shared:Resource) "
+        "MATCH (sibling:Resource)-[:DEPENDS_ON|HOSTED_BY]->(shared) "
+        "WHERE sibling.asset_name <> $asset_name AND sibling.in_scope = true "
+        "RETURN shared.asset_name AS shared_dependency, shared.asset_type AS shared_type, "
+        "shared.env AS shared_env, collect(DISTINCT sibling.asset_name)[..10] AS co_dependents, "
+        "count(DISTINCT sibling) AS co_dependent_count, "
+        "collect(DISTINCT sibling.team)[..5] AS affected_teams "
+        "ORDER BY co_dependent_count DESC LIMIT 20",
+        {"asset_name": asset_name},
+    )
+
+    sa_chain = _run_query(
+        "MATCH (target:Resource {asset_name: $asset_name})"
+        "-[:USES_SERVICE_ACCOUNT]->(sa:Resource) "
+        "MATCH (sa)-[:GRANTS_ACCESS_TO]->(reachable:Resource) "
+        "RETURN sa.asset_name AS service_account, sa.short_name AS sa_email, "
+        "collect(DISTINCT reachable.asset_name)[..20] AS resources_accessible, "
+        "count(DISTINCT reachable) AS accessible_count, "
+        "collect(DISTINCT reachable.env)[..5] AS accessible_envs "
+        "ORDER BY accessible_count DESC",
+        {"asset_name": asset_name},
+    )
+
+    return {
+        "upstream_dependencies": upstream,
+        "shared_dependency_exposure": shared,
+        "service_account_chain": sa_chain,
+    }
+
+
 def query_iam_paths(asset_name: str) -> list[dict]:
     rows = _run_query(
         "MATCH (vuln:Resource {asset_name: $asset_name})<-[:GRANTS_ACCESS_TO]-(sa:Resource) MATCH (sa)-[:GRANTS_ACCESS_TO]->(prod:Resource {env: 'prod'}) WHERE prod.asset_name <> $asset_name RETURN sa.asset_name AS service_account, sa.short_name AS sa_email, collect(DISTINCT prod.asset_name)[..10] AS reachable_prod_resources, count(DISTINCT prod) AS prod_blast_count ORDER BY prod_blast_count DESC LIMIT 10",
