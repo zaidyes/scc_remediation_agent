@@ -5,14 +5,17 @@ description = "Autonomous GCP security remediation agent"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "google-adk>=1.0.0",
     "google-cloud-asset>=3.0.0",
     "google-cloud-securitycenter>=1.0.0",
     "google-cloud-osconfig>=1.0.0",
+    "google-cloud-secret-manager>=2.0.0",
     "neo4j>=5.0.0",
     "pydantic>=2.0.0",
     "pytz>=2023.3",
     "google-api-python-client>=2.0.0",
     "google-cloud-firestore>=2.0.0",
-    # Note: agents-cli and google-agents-adk would typically be provided
-    # by the environment or installed via `agents-cli install`
 ]
+
+[tool.uv.sources]
+# agents-cli is installed separately via: uvx google-agents-cli setup

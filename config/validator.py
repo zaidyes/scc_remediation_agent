@@ -38,7 +38,7 @@ async def validate_and_preview(config: CustomerConfig) -> dict:
         asset_count = 0 # Stub
 
     try:
-        from agent.tools.scc_tools import list_active_findings
+        from app.tools.scc_tools import list_active_findings
         findings = list(list_active_findings(config.org_id, config.severity_threshold.to_api_values()))
         in_scope_findings = [f for f in findings if config.scope.matches_asset({"project": _extract_project(f["resource_name"]), "labels": {}})]
     except ImportError:

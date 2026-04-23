@@ -1,17 +1,4 @@
-# ADK Core Imports (Assumed standard for Agent Garden ADK)
-try:
-    from adk import Agent
-    from adk.models import Gemini
-    import adk.types as types
-except ImportError:
-    # Fallback/Mock for local testing without the framework
-    class Agent:
-        def __init__(self, **kwargs): pass
-    class Gemini:
-        def __init__(self, **kwargs): pass
-    class types:
-        class HttpRetryOptions:
-            def __init__(self, **kwargs): pass
+from google.adk.agents import Agent
 
 from app.tools.scc_tools import get_finding_detail, mute_resolved_finding
 from app.tools.graph_tools import query_blast_radius, query_iam_paths, check_dormancy
@@ -34,10 +21,7 @@ Always provide clear, JSON-structured plans when requesting approvals, including
 
 root_agent = Agent(
     name="scc_remediation_agent",
-    model=Gemini(
-        model="gemini-3-flash-preview",
-        retry_options=types.HttpRetryOptions(attempts=3),
-    ),
+    model="gemini-3-flash-preview",
     instruction=INSTRUCTION,
     tools=[
         get_finding_detail,

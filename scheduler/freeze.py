@@ -6,7 +6,7 @@ def is_change_frozen(asset_name: str, config) -> bool:
     2. Project-level label change-freeze=true
     3. Config-level global freeze toggle
     """
-    from agent.tools.graph_tools import get_resource_labels, _get_project_resource
+    from app.tools.graph_tools import get_resource_labels, _get_project_resource
     
     labels = get_resource_labels(asset_name)
     if labels.get("change-freeze") == "true":

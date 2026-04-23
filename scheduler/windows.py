@@ -7,7 +7,7 @@ def next_maintenance_window(config: CustomerConfig, asset_name: str) -> datetime
     Returns the UTC datetime of the start of the next maintenance window
     for the given asset. Checks resource label first, falls back to default.
     """
-    from agent.tools.graph_tools import get_resource_maint_window
+    from app.tools.graph_tools import get_resource_maint_window
     resource_window_label = get_resource_maint_window(asset_name)
     
     # If the resource has a specific window format in the label, parse it.

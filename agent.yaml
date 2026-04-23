@@ -1,0 +1,75 @@
+name: scc-remediation-agent
+display_name: SCC Remediation Agent
+version: 0.1.0
+description: |
+  Autonomous GCP security remediation agent. Ingests SCC findings,
+  analyses blast radius via asset graph, generates remediation plans,
+  and executes approved fixes using GCP-native APIs.
+author: your-org
+category: security
+tags: [security, scc, remediation, gcp, vulnerability-management]
+
+entrypoint: app/agent.py
+
+model:
+  reasoning: gemini-3-flash-preview
+  planning: gemini-3.1-pro-preview
+
+tools:
+  - name: get_finding_detail
+    module: app/tools/scc_tools.py
+  - name: mute_resolved_finding
+    module: app/tools/scc_tools.py
+  - name: query_blast_radius
+    module: app/tools/graph_tools.py
+  - name: query_iam_paths
+    module: app/tools/graph_tools.py
+  - name: check_dormancy
+    module: app/tools/graph_tools.py
+  - name: get_network_exposure
+    module: app/tools/network_tools.py
+  - name: create_patch_job
+    module: app/tools/osconfig_tools.py
+  - name: dispatch_approval_request
+    module: app/tools/approval_tools.py
+
+triggers:
+  - type: schedule
+    cron: "*/15 * * * *"
+    description: Poll for new SCC findings
+  - type: pubsub
+    topic: scc-findings-notifications
+    description: Real-time SCC finding notifications
+
+config:
+  source: firestore
+  collection: configs
+  key_from_env: CUSTOMER_ID
+
+marketplace:
+  icon: assets/icon.png
+  screenshots:
+    - assets/screenshot-dashboard.png
+    - assets/screenshot-approval-card.png
+    - assets/screenshot-config.png
+  long_description: |
+    scc-remediation-agent connects to Security Command Center, builds a
+    comprehensive asset graph of your GCP organisation, and autonomously
+    remediates security findings — with human approval gates, blast radius
+    analysis, and full audit trails.
+
+    Customers configure which projects and assets to scope, set severity
+    thresholds, define approval chains, and control execution modes. The
+    agent handles the rest. Dry-run mode is on by default — no changes
+    are applied until the customer explicitly enables execution.
+  documentation_url: https://github.com/your-org/scc-remediation-agent#readme
+  support_url: https://github.com/your-org/scc-remediation-agent/issues
+  required_permissions:
+    - securitycenter.findings.list
+    - securitycenter.findings.setMute
+    - cloudasset.assets.listResource
+    - osconfig.patchJobs.create
+    - iam.roles.list
+    - cloudtasks.tasks.create
+    - firestore.documents.write
+  deployment_type: customer_project
