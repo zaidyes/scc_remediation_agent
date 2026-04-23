@@ -1,0 +1,92 @@
+[
+  {
+    "asset_name": "//compute.googleapis.com/projects/prod-project-1/zones/us-central1-a/instances/web-server-prod-1",
+    "asset_type": "compute.googleapis.com/Instance",
+    "project": "prod-project-1",
+    "location": "us-central1-a",
+    "labels": {"env": "prod", "team": "platform", "owner": "alice@acme.com", "data-class": "internal"},
+    "status": "RUNNING",
+    "create_time": "2024-01-15T10:00:00Z",
+    "ancestors": ["projects/prod-project-1", "folders/111111111", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//compute.googleapis.com/projects/prod-project-1/zones/us-central1-b/instances/api-server-prod-2",
+    "asset_type": "compute.googleapis.com/Instance",
+    "project": "prod-project-1",
+    "location": "us-central1-b",
+    "labels": {"env": "prod", "team": "backend", "owner": "bob@acme.com", "data-class": "pii"},
+    "status": "RUNNING",
+    "create_time": "2024-02-20T11:00:00Z",
+    "ancestors": ["projects/prod-project-1", "folders/111111111", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//compute.googleapis.com/projects/prod-project-1/global/firewalls/allow-all-ingress",
+    "asset_type": "compute.googleapis.com/Firewall",
+    "project": "prod-project-1",
+    "location": "global",
+    "labels": {"env": "prod", "team": "platform"},
+    "status": "RUNNING",
+    "create_time": "2023-06-01T08:00:00Z",
+    "ancestors": ["projects/prod-project-1", "folders/111111111", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//sqladmin.googleapis.com/projects/prod-project-1/instances/main-db-prod",
+    "asset_type": "sqladmin.googleapis.com/Instance",
+    "project": "prod-project-1",
+    "location": "us-central1",
+    "labels": {"env": "prod", "team": "backend", "owner": "bob@acme.com", "data-class": "pii"},
+    "status": "RUNNABLE",
+    "create_time": "2024-01-10T09:00:00Z",
+    "ancestors": ["projects/prod-project-1", "folders/111111111", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//storage.googleapis.com/projects/prod-project-1/buckets/prod-data-bucket",
+    "asset_type": "storage.googleapis.com/Bucket",
+    "project": "prod-project-1",
+    "location": "us-central1",
+    "labels": {"env": "prod", "team": "data", "data-class": "pii"},
+    "status": "RUNNING",
+    "create_time": "2023-09-01T12:00:00Z",
+    "ancestors": ["projects/prod-project-1", "folders/111111111", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//compute.googleapis.com/projects/dev-project-1/zones/us-central1-a/instances/batch-worker-dev-1",
+    "asset_type": "compute.googleapis.com/Instance",
+    "project": "dev-project-1",
+    "location": "us-central1-a",
+    "labels": {"env": "dev", "team": "platform", "owner": "charlie@acme.com"},
+    "status": "TERMINATED",
+    "create_time": "2024-03-01T10:00:00Z",
+    "ancestors": ["projects/dev-project-1", "folders/222222222", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//container.googleapis.com/projects/staging-project-1/zones/us-central1-a/clusters/k8s-staging",
+    "asset_type": "container.googleapis.com/Cluster",
+    "project": "staging-project-1",
+    "location": "us-central1-a",
+    "labels": {"env": "staging", "team": "backend", "owner": "dave@acme.com"},
+    "status": "RUNNING",
+    "create_time": "2024-04-01T08:00:00Z",
+    "ancestors": ["projects/staging-project-1", "folders/333333333", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//iam.googleapis.com/projects/prod-project-1/serviceAccounts/svc-api@prod-project-1.iam.gserviceaccount.com",
+    "asset_type": "iam.googleapis.com/ServiceAccount",
+    "project": "prod-project-1",
+    "location": "global",
+    "labels": {"env": "prod", "team": "backend"},
+    "status": "RUNNING",
+    "create_time": "2024-01-05T07:00:00Z",
+    "ancestors": ["projects/prod-project-1", "folders/111111111", "organizations/123456789"]
+  },
+  {
+    "asset_name": "//compute.googleapis.com/projects/out-of-scope-project/zones/us-east1-a/instances/legacy-vm-1",
+    "asset_type": "compute.googleapis.com/Instance",
+    "project": "out-of-scope-project",
+    "location": "us-east1-a",
+    "labels": {"env": "prod"},
+    "status": "RUNNING",
+    "create_time": "2022-01-01T00:00:00Z",
+    "ancestors": ["projects/out-of-scope-project", "folders/999999999", "organizations/123456789"]
+  }
+]
