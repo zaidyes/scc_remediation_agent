@@ -1,0 +1,25 @@
+{
+  "eval_set_id": "basic_eval",
+  "name": "SCC Triage and Remediation Evaluation",
+  "eval_cases": [
+    {
+      "eval_id": "critical_vuln_triage",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "A new CRITICAL finding just appeared: CVE-2024-1234 on compute-instance-prod-1. What should we do?"
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      }
+    }
+  ]
+}
