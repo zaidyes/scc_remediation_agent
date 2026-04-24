@@ -1,6 +1,9 @@
 import json
+import os
 import uuid
-import google.generativeai as genai
+
+from google import genai
+from google.genai import types
 
 from config.schema import RemediationMode
 
@@ -85,16 +88,14 @@ class PlanAgent:
             dry_run=self.config.dry_run,
         )
 
-        model = genai.GenerativeModel("gemini-3.1-pro-preview")
-        response = await model.generate_content_async(prompt)
+        client = genai.Client()
+        response = await client.aio.models.generate_content(
+            model=os.getenv("PLANNING_MODEL_ID", "gemini-3.1-pro-preview"),
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json"),
+        )
 
         raw = response.text.strip()
-        # Strip markdown code fences if the model wraps the JSON
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-
         plan = json.loads(raw)
         plan["plan_id"] = plan.get("plan_id") or str(uuid.uuid4())
         plan["dry_run"] = self.config.dry_run

@@ -1,12 +1,14 @@
 [project]
 name = "scc-remediation-agent"
 version = "0.1.0"
-description = "Autonomous GCP security remediation agent"
+description = "Autonomous GCP security remediation agent powered by Google ADK"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "google-adk>=1.0.0",
-    "google-generativeai>=0.8.0",
+    "google-genai>=1.0.0",
+    "google-auth>=2.0.0",
     "google-cloud-asset>=3.0.0",
     "google-cloud-securitycenter>=1.0.0",
     "google-cloud-osconfig>=1.0.0",
@@ -22,6 +24,10 @@ dependencies = [
     "aiohttp>=3.9.0",
 ]
 
+[build-system]
+requires = ["uv_build>=0.6.6,<0.7"]
+build-backend = "uv_build"
+
 [tool.uv.sources]
 # agents-cli is installed separately via: uvx google-agents-cli setup
 
@@ -34,3 +40,11 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+ignore = ["E501"]
