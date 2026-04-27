@@ -92,6 +92,7 @@ async def chat_webhook(request: Request):
             "responded_by": responder_email,
             "responded_at": now,
         })
+        _deindex(approval)
         return _chat_update_card(approval_id, "REJECTED", responder_email, now)
 
     elif action_name == "defer_remediation":
@@ -146,6 +147,7 @@ async def pagerduty_webhook(request: Request):
 
         elif event_type == "incident.resolve":
             doc_ref.update({"status": "REJECTED", "responded_at": datetime.datetime.utcnow()})
+            _deindex(doc.to_dict())
 
     return {"status": "ok"}
 
@@ -193,6 +195,7 @@ async def jira_webhook(request: Request):
 
     elif "REJECTED" in comment_body:
         doc_ref.update({"status": "REJECTED", "responded_by": author_email, "responded_at": now})
+        _deindex(doc.to_dict())
 
     return {"status": "ok"}
 
@@ -243,6 +246,92 @@ async def escalate(request: Request):
     return {"status": "escalated"}
 
 
+@app.post("/api/rollback/{approval_id}")
+async def rollback(approval_id: str):
+    """
+    Executes the stored rollback artifact for an approval.
+    Available for 24 hours after execution.
+    """
+    from app.tools.rollback_tools import execute_rollback
+    result = await execute_rollback(approval_id)
+    if result["status"] == "FAILED":
+        raise HTTPException(status_code=400, detail=result["output"])
+    return result
+
+
+@app.post("/internal/reanalyse")
+async def reanalyse(request: Request):
+    """
+    Called by Cloud Tasks (with 2-minute delay) when an approval is invalidated.
+    Re-runs the full analysis pipeline and creates a new approval record that
+    supersedes the invalidated one.
+    """
+    body = await request.json()
+    finding_id = body.get("finding_id")
+    supersedes_approval_id = body.get("supersedes_approval_id")
+    customer_id = body.get("customer_id") or os.environ.get("CUSTOMER_ID", "")
+
+    if not finding_id:
+        raise HTTPException(status_code=400, detail="Missing finding_id")
+
+    db = _get_db()
+    config_doc = db.collection("customer_configs").document(customer_id).get()
+    if not config_doc.exists:
+        raise HTTPException(status_code=500, detail="Config not found")
+
+    from config.schema import CustomerConfig
+    from config.policies import ExecutionPolicy
+    from app.tools.scc_tools import get_finding_detail
+    from app.agents.impact_agent import ImpactAgent
+    from app.agents.dormancy_agent import DormancyAgent
+    from app.agents.plan_agent import PlanAgent
+    from app.tools.confidence import compute_confidence_score
+    from app.main import _determine_execution_tier, _dispatch_for_approval, _get_historical_outcomes
+
+    config = CustomerConfig(**config_doc.to_dict())
+    policies = [ExecutionPolicy(**p) for p in config.policies]
+
+    finding = get_finding_detail(finding_id, config.org_id)
+    if not finding:
+        raise HTTPException(status_code=404, detail="Finding not found")
+
+    impact = await ImpactAgent(config).analyse(finding)
+    dormancy = await DormancyAgent(config).check(finding["resource_name"])
+    plan = await PlanAgent(config).generate(finding, impact, dormancy)
+
+    if plan is None:
+        return {"status": "no_plan", "finding_id": finding_id}
+
+    # Tag this plan as superseding the invalidated approval
+    plan["supersedes_approval_id"] = supersedes_approval_id
+
+    preflight_results = plan.get("preflight_results", [])
+    blast_level = impact.get("blast_level", "HIGH")
+    historical = await _get_historical_outcomes(
+        customer_id, finding.get("finding_class", ""), plan.get("remediation_type", "")
+    )
+    confidence = compute_confidence_score(
+        preflight_results=preflight_results,
+        blast_level=blast_level,
+        dormancy_class=impact.get("dormancy_class", "ACTIVE"),
+        historical_outcomes=historical,
+        finding_class=finding.get("finding_class", ""),
+    )
+    plan["confidence_score"] = confidence
+
+    tier = _determine_execution_tier(
+        finding=finding,
+        blast_level=blast_level,
+        confidence=confidence,
+        preflight_results=preflight_results,
+        policies=policies,
+        config=config,
+    )
+
+    await _dispatch_for_approval(plan, finding, impact, config, tier=tier)
+    return {"status": "reanalysed", "finding_id": finding_id, "tier": tier}
+
+
 @app.post("/internal/execute")
 async def execute(request: Request):
     """
@@ -276,6 +365,19 @@ async def execute(request: Request):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _deindex(approval: dict) -> None:
+    """Removes a terminal approval from the proximity index."""
+    try:
+        from graph.events.proximity_index import deindex_approval
+        deindex_approval(
+            approval_id=approval["approval_id"],
+            target_asset=approval.get("asset_name", ""),
+            blast_radius_assets=approval.get("blast_radius_assets", []),
+        )
+    except Exception as e:
+        print(f"[proximity] Failed to deindex approval {approval.get('approval_id')}: {e}")
+
 
 def _is_valid_approver(email: str, severity: str, config) -> bool:
     for approver in config.approval_policy.approvers:

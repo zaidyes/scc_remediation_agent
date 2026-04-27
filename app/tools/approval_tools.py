@@ -63,6 +63,18 @@ async def dispatch_approval_request(
 
     db.collection("approvals").document(approval_id).set(approval_doc)
 
+    # Register in proximity index so the event processor can find this approval
+    # when assets in its blast radius change.
+    try:
+        from graph.events.proximity_index import index_approval
+        index_approval(
+            approval_id=approval_id,
+            target_asset=finding["resource_name"],
+            blast_radius_assets=impact.get("blast_radius_assets", []),
+        )
+    except Exception as e:
+        print(f"[proximity] Failed to index approval {approval_id}: {e}")
+
     for channel in channels:
         if channel == "google_chat" and config.notifications.google_chat_space:
             await _send_chat_card(approval_id, plan, finding, impact, config)
@@ -139,23 +151,43 @@ async def _send_chat_card(approval_id, plan, finding, impact, config):
         for s in plan.get("rollback_steps", [])[:3]
     )
 
+    # Pre-flight summary for the card
+    preflight_results = plan.get("preflight_results", [])
+    preflight_lines = [
+        f"{'✅' if r['result'] == 'PASS' else '⚠️' if r['result'] == 'WARN' else '🚫'} "
+        f"{r['check']}: {r['detail']}"
+        for r in preflight_results
+    ]
+    preflight_text = "\n".join(preflight_lines) or "No pre-flight checks recorded."
+
+    confidence = plan.get("confidence_score")
+    confidence_text = f"{confidence:.0%}" if confidence is not None else "N/A"
+    tier = plan.get("execution_tier", 3)
+    tier_labels = {1: "Tier 1 — Autonomous", 2: "Tier 2 — Policy-assisted", 3: "Tier 3 — Expert review"}
+
     card = {
         "cardsV2": [{
             "cardId": f"approval-{approval_id}",
             "card": {
                 "header": {
                     "title": "Remediation approval required",
-                    "subtitle": f"{finding['severity']} · {finding['category']}",
+                    "subtitle": f"{finding['severity']} · {finding['category']} · {tier_labels.get(tier, '')}",
                 },
                 "sections": [
                     {
                         "widgets": [
                             {"textParagraph": {"text": f"<b>Asset:</b> {finding['resource_name']}"}},
                             {"textParagraph": {"text": f"<b>Finding:</b> {plan['summary']}"}},
-                            {"textParagraph": {"text": f"<b>Blast radius:</b> {impact['blast_level']} · {impact['prod_blast_count']} prod dependencies"}},
-                            {"textParagraph": {"text": f"<b>Environment:</b> {impact['asset_env']} · Team: {impact['asset_team']} · Owner: {impact.get('asset_owner', 'unknown')}"}},
+                            {"textParagraph": {"text": f"<b>Blast radius:</b> {impact.get('blast_level', 'UNKNOWN')} · {impact.get('prod_blast_count', 0)} prod dependencies"}},
+                            {"textParagraph": {"text": f"<b>Confidence:</b> {confidence_text}"}},
                             {"textParagraph": {"text": f"<b>Risk assessment:</b> {plan.get('risk_assessment', '')}"}},
                             {"textParagraph": {"text": f"<b>Downtime:</b> {plan.get('estimated_downtime_minutes', 0)} min · Reboot: {'Yes' if plan.get('requires_reboot') else 'No'}"}},
+                        ]
+                    },
+                    {
+                        "header": "Pre-flight checks",
+                        "widgets": [
+                            {"textParagraph": {"text": preflight_text}}
                         ]
                     },
                     {
