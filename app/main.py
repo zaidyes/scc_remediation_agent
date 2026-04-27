@@ -55,12 +55,19 @@ async def _process_finding(
         print(f"[plan] No applicable remediation mode for {finding['finding_id']} — skipping")
         return
 
+    if plan.get("status") == "BLOCKED":
+        print(
+            f"[plan] BLOCKED for {finding['finding_id']}: {plan.get('block_reason')} "
+            f"— escalating to Tier 3 for human resolution"
+        )
+        await _dispatch_for_approval(plan, finding, impact_result, config, tier=3)
+        return
+
     blast_level = impact_result.get("blast_level", "HIGH")
     dormancy_class = impact_result.get("dormancy_class", "ACTIVE")
 
-    # Pre-flight results are empty at this phase — Phase 2 will populate them.
-    # The confidence score still captures blast radius and dormancy signals.
-    preflight_results: list[dict] = []
+    # Pre-flight results are now embedded in the plan by PlanAgent Phase 1
+    preflight_results: list[dict] = plan.get("preflight_results", [])
 
     historical_outcomes = await _get_historical_outcomes(
         config.customer_id,

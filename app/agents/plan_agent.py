@@ -1,23 +1,40 @@
+"""
+Two-phase plan generation:
+  Phase 1 — deterministic pre-flight checks (PreflightAgent, no LLM)
+  Phase 2 — configuration-specific plan generation (Gemini, using real resource data)
+"""
 import json
 import os
 import uuid
 
 from google import genai
+from google.cloud import asset_v1
 from google.genai import types
 
+from app.agents.preflight_agent import PreflightAgent
 from config.schema import RemediationMode
 
-PLAN_PROMPT_TEMPLATE = """
-You are a GCP security remediation specialist. Generate a detailed remediation plan.
+_FINDING_CLASS_TO_MODE: dict[str, str] = {
+    "VULNERABILITY": "OS_PATCH",
+    "MISCONFIGURATION": "MISCONFIGURATION",
+    "IAM_POLICY": "IAM",
+    "NETWORK": "FIREWALL",
+    "SCC_ERROR": None,
+    "OBSERVATION": None,
+}
+
+_PLAN_PROMPT = """
+## Pre-flight results
+{preflight_json}
+
+## Full resource data (live from Asset Inventory)
+{resource_data_json}
 
 ## Finding
 {finding_json}
 
-## Asset context
+## Graph context (blast radius, IAM paths, dormancy)
 {impact_json}
-
-## Dormancy
-{dormancy_json}
 
 ## SCC remediation guidance
 {remediation_text}
@@ -27,62 +44,52 @@ Enabled remediation modes: {enabled_modes}
 Dry run: {dry_run}
 
 ## Instructions
-Generate a JSON remediation plan with the following structure:
-{{
-  "plan_id": "<uuid>",
-  "finding_id": "<finding_id>",
-  "asset_name": "<asset_name>",
-  "remediation_type": "OS_PATCH | MISCONFIGURATION | IAM | FIREWALL",
-  "summary": "<one sentence>",
-  "risk_assessment": "<2-3 sentences on blast radius and change risk>",
-  "steps": [
-    {{
-      "order": 1,
-      "action": "<description>",
-      "api_call": "<gcloud command or API>",
-      "expected_outcome": "<what happens>",
-      "verification": "<how to confirm success>"
-    }}
-  ],
-  "rollback_steps": [
-    {{
-      "order": 1,
-      "action": "<rollback action>",
-      "api_call": "<gcloud command or API>"
-    }}
-  ],
-  "estimated_downtime_minutes": 0,
-  "requires_reboot": false,
-  "confidence": "HIGH | MEDIUM | LOW",
-  "change_window_required": true
-}}
-
-Return only valid JSON. No preamble or explanation.
+Generate a remediation plan specific to THIS resource's current configuration.
+Reference actual disk names, zones, service account emails, and flags from the
+resource data. If any pre-flight check returned BLOCK, set plan status to
+BLOCKED and explain why. Include exact gcloud commands or API calls, not
+generic patterns. Include a machine-executable rollback artifact for every step.
 """
-
-_FINDING_CLASS_TO_MODE = {
-    "VULNERABILITY": "OS_PATCH",
-    "MISCONFIGURATION": "MISCONFIGURATION",
-    "SCC_ERROR": None,
-    "OBSERVATION": None,
-}
 
 
 class PlanAgent:
     def __init__(self, config):
         self.config = config
 
-    async def generate(self, finding: dict, impact: dict, dormancy: dict) -> dict | None:
-        enabled_modes = [m.value for m in self.config.execution.enabled_modes]
+    async def generate(
+        self,
+        finding: dict,
+        impact: dict,
+        dormancy: dict,
+    ) -> dict | None:
+        enabled_modes = [
+            m.value if hasattr(m, "value") else m
+            for m in self.config.execution.enabled_modes
+        ]
 
         finding_class = finding.get("finding_class", "")
-        if not _has_applicable_mode(finding_class, enabled_modes):
+        remediation_type = _FINDING_CLASS_TO_MODE.get(finding_class)
+        if remediation_type is None or remediation_type not in enabled_modes:
             return None
 
-        prompt = PLAN_PROMPT_TEMPLATE.format(
+        # ------------------------------------------------------------------- #
+        # Phase 1 — Pre-flight checks (deterministic, no LLM)
+        # ------------------------------------------------------------------- #
+        resource_data = await _fetch_resource_data(finding["resource_name"])
+
+        preflight = PreflightAgent(self.config)
+        preflight_results = await preflight.run(finding, remediation_type, resource_data)
+
+        has_block = any(r.get("result") == "BLOCK" for r in preflight_results)
+
+        # ------------------------------------------------------------------- #
+        # Phase 2 — Configuration-specific plan generation (LLM)
+        # ------------------------------------------------------------------- #
+        prompt = _PLAN_PROMPT.format(
+            preflight_json=json.dumps(preflight_results, indent=2),
+            resource_data_json=json.dumps(resource_data, indent=2, default=str),
             finding_json=json.dumps(finding, indent=2, default=str),
             impact_json=json.dumps(impact, indent=2),
-            dormancy_json=json.dumps(dormancy, indent=2),
             remediation_text=finding.get("remediation_text", "No guidance available."),
             enabled_modes=", ".join(enabled_modes),
             dry_run=self.config.dry_run,
@@ -95,13 +102,59 @@ class PlanAgent:
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
 
-        raw = response.text.strip()
-        plan = json.loads(raw)
+        plan = json.loads(response.text.strip())
         plan["plan_id"] = plan.get("plan_id") or str(uuid.uuid4())
         plan["dry_run"] = self.config.dry_run
+        plan["preflight_results"] = preflight_results
+        plan["remediation_type"] = remediation_type
+
+        # Enforce: if any BLOCK in pre-flight, plan must be BLOCKED regardless
+        # of what the LLM returned
+        if has_block:
+            plan["status"] = "BLOCKED"
+            if not plan.get("block_reason"):
+                block_checks = [r["detail"] for r in preflight_results if r["result"] == "BLOCK"]
+                plan["block_reason"] = "; ".join(block_checks)
+
         return plan
 
 
-def _has_applicable_mode(finding_class: str, enabled_modes: list[str]) -> bool:
-    required = _FINDING_CLASS_TO_MODE.get(finding_class)
-    return required is not None and required in enabled_modes
+async def _fetch_resource_data(resource_name: str) -> dict:
+    """
+    Fetches the full resource.data blob from Cloud Asset Inventory.
+    Returns an empty dict if the asset is not found or on error.
+    """
+    try:
+        client = asset_v1.AssetServiceClient()
+
+        # CAI asset names use the //service/... format
+        # resource_name from SCC may already be in that format or may be
+        # a REST resource path — normalise either way
+        asset_name = resource_name
+        if not resource_name.startswith("//"):
+            # Convert REST resource path to CAI asset name format
+            asset_name = "//" + resource_name.replace("https://", "")
+
+        response = client.batch_get_assets_history(
+            parent=_extract_org_or_project(resource_name),
+            asset_names=[asset_name],
+            content_type=asset_v1.ContentType.RESOURCE,
+            read_time_window=asset_v1.TimeWindow(),
+        )
+
+        for asset in response.assets:
+            if asset.asset.resource and asset.asset.resource.data:
+                return dict(asset.asset.resource.data)
+
+        return {}
+    except Exception:
+        return {}
+
+
+def _extract_org_or_project(resource_name: str) -> str:
+    """Returns the closest project or org scope for CAI lookups."""
+    parts = resource_name.replace("//", "").split("/")
+    if "projects" in parts:
+        idx = parts.index("projects")
+        return f"projects/{parts[idx + 1]}"
+    return resource_name
