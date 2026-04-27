@@ -1,7 +1,11 @@
-from pydantic import BaseModel, Field, validator
-from typing import Optional
-from enum import Enum
 import datetime
+from enum import Enum
+from typing import TYPE_CHECKING, Optional
+
+from pydantic import BaseModel, Field, validator
+
+if TYPE_CHECKING:
+    from config.policies import ExecutionPolicy
 
 class SeverityThreshold(str, Enum):
     CRITICAL_ONLY = "CRITICAL_ONLY"
@@ -106,7 +110,7 @@ class NotificationConfig(BaseModel):
 class CustomerConfig(BaseModel):
     customer_id: str
     org_id: str
-    display_name: str
+    display_name: str = ""
     version: int = 1
     created_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
     updated_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
@@ -118,6 +122,10 @@ class CustomerConfig(BaseModel):
     approval_policy: ApprovalPolicy
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    # Autonomous execution policies — empty list means all findings go to Tier 3
+    policies: list[dict] = Field(default_factory=list)
+    # Using list[dict] instead of list[ExecutionPolicy] to avoid circular import;
+    # app/main.py coerces these to ExecutionPolicy objects at runtime.
 
     class Config:
         use_enum_values = True

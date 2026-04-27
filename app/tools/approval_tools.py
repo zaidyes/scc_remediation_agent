@@ -12,13 +12,23 @@ async def dispatch_approval_request(
     impact: dict,
     config,
     channels: list[str],
+    tier: int = 3,
 ) -> str:
     """
     Creates an approval record in Firestore and sends the card to all channels.
     Returns the approval_id.
+
+    tier: execution tier (1=autonomous [not dispatched], 2=single-tap, 3=expert review)
     """
     approval_id = str(uuid.uuid4())
     db = firestore.Client()
+
+    # Tier 2 timeout is 4 hours before escalating to Tier 3 (per addendum §2.2)
+    expires_at = (
+        datetime.datetime.utcnow() + datetime.timedelta(hours=4)
+        if tier == 2
+        else _compute_expiry(finding["severity"], config)
+    )
 
     approval_doc = {
         "approval_id": approval_id,
@@ -26,16 +36,29 @@ async def dispatch_approval_request(
         "finding_id": finding["finding_id"],
         "asset_name": finding["resource_name"],
         "severity": finding["severity"],
-        "blast_level": impact["blast_level"],
+        "blast_level": impact.get("blast_level", "UNKNOWN"),
+        "confidence_score": plan.get("confidence_score"),
+        "execution_tier": tier,
         "status": "PENDING",
         "created_at": firestore.SERVER_TIMESTAMP,
-        "expires_at": _compute_expiry(finding["severity"], config),
+        "expires_at": expires_at,
         "channels_notified": channels,
         "plan_summary": plan["summary"],
         "rollback_steps": plan.get("rollback_steps", []),
         "plan": plan,
         "responded_by": None,
         "responded_at": None,
+        # Fields required by addendum §6.4 (populated by later phases)
+        "blast_radius_assets": impact.get("blast_radius_assets", []),
+        "scheduled_execution_at": None,
+        "change_annotations": [],
+        "warnings": [],
+        "invalidation_reason": None,
+        "invalidated_at": None,
+        "block_reason": None,
+        "blocked_at": None,
+        "reanalysis_task_id": None,
+        "supersedes_approval_id": None,
     }
 
     db.collection("approvals").document(approval_id).set(approval_doc)

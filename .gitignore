@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+
+# Environment — never commit real credentials
+.env
+!.env.example
+
+# Terraform state — contains resource IDs and may contain secrets
+terraform/.terraform/
+terraform/**/.terraform/
+terraform/*.tfstate
+terraform/**/*.tfstate
+terraform/*.tfstate.backup
+terraform/**/*.tfstate.backup
+terraform/*.tfplan
+terraform/**/*.tfplan
+
+# Node
+ui/node_modules/
+ui/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
