@@ -27,3 +27,6 @@ ui/dist/
 .vscode/
 .idea/
 *.swp
+
+# Research papers / local docs
+*.pdf
