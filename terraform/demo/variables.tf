@@ -35,3 +35,9 @@ variable "folder_name" {
   type        = string
   default     = "scc-agent-demo"
 }
+
+variable "event_processor_image" {
+  description = "Docker image URI for the event processor Cloud Run service."
+  type        = string
+  default     = "gcr.io/PROJECT_ID/scc-event-processor:latest"
+}

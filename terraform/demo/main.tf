@@ -74,6 +74,8 @@ locals {
     "secretmanager.googleapis.com",
     "chat.googleapis.com",
     "container.googleapis.com",
+    "pubsub.googleapis.com",
+    "logging.googleapis.com",
   ]
   workload_services = [
     "compute.googleapis.com",
@@ -134,4 +136,184 @@ resource "google_secret_manager_secret" "neo4j_password" {
 resource "google_secret_manager_secret_version" "neo4j_password" {
   secret      = google_secret_manager_secret.neo4j_password.id
   secret_data = var.neo4j_password
+}
+
+# --------------------------------------------------------------------------- #
+# Pub/Sub — event bus for CAI feeds and audit logs
+# --------------------------------------------------------------------------- #
+
+resource "google_pubsub_topic" "asset_change_events" {
+  name    = "asset-change-events"
+  project = google_project.projects["infra"].project_id
+  depends_on = [google_project_service.infra_services]
+}
+
+resource "google_pubsub_topic" "audit_change_events" {
+  name    = "audit-change-events"
+  project = google_project.projects["infra"].project_id
+  depends_on = [google_project_service.infra_services]
+}
+
+resource "google_pubsub_topic" "event_processor_dlq" {
+  name                       = "event-processor-dlq"
+  project                    = google_project.projects["infra"].project_id
+  message_retention_duration = "86400s"
+  depends_on                 = [google_project_service.infra_services]
+}
+
+# --------------------------------------------------------------------------- #
+# Event processor Cloud Run service
+# --------------------------------------------------------------------------- #
+
+resource "google_service_account" "event_processor_sa" {
+  account_id   = "event-processor"
+  display_name = "SCC Agent Event Processor"
+  project      = google_project.projects["infra"].project_id
+}
+
+resource "google_service_account" "event_processor_invoker_sa" {
+  account_id   = "event-processor-invoker"
+  display_name = "Pub/Sub → Event Processor invoker"
+  project      = google_project.projects["infra"].project_id
+}
+
+resource "google_cloud_run_v2_service" "event_processor" {
+  name     = "scc-event-processor"
+  location = var.region
+  project  = google_project.projects["infra"].project_id
+
+  ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
+
+  template {
+    service_account = google_service_account.event_processor_sa.email
+
+    containers {
+      image = var.event_processor_image
+
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = google_project.projects["infra"].project_id
+      }
+      env {
+        name  = "NEO4J_URI"
+        value = "bolt://${module.neo4j.neo4j_internal_ip}:7687"
+      }
+      env {
+        name = "NEO4J_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.neo4j_password.secret_id
+            version = "latest"
+          }
+        }
+      }
+      env {
+        name  = "SCHEDULER_SERVICE_URL"
+        value = google_cloud_run_v2_service.scheduler.uri
+      }
+      env {
+        name  = "CLOUD_TASKS_LOCATION"
+        value = var.region
+      }
+      env {
+        name  = "CLOUD_TASKS_QUEUE"
+        value = "scc-remediation-tasks"
+      }
+
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "512Mi"
+        }
+      }
+    }
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 3
+    }
+  }
+
+  depends_on = [
+    google_project_service.infra_services,
+    google_secret_manager_secret_version.neo4j_password,
+  ]
+}
+
+resource "google_pubsub_subscription" "asset_events_push" {
+  name    = "asset-events-processor-push"
+  topic   = google_pubsub_topic.asset_change_events.id
+  project = google_project.projects["infra"].project_id
+
+  push_config {
+    push_endpoint = "${google_cloud_run_v2_service.event_processor.uri}/events/asset"
+    oidc_token {
+      service_account_email = google_service_account.event_processor_invoker_sa.email
+    }
+  }
+
+  ack_deadline_seconds       = 60
+  message_retention_duration = "600s"
+
+  dead_letter_policy {
+    dead_letter_topic     = google_pubsub_topic.event_processor_dlq.id
+    max_delivery_attempts = 5
+  }
+
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "300s"
+  }
+}
+
+resource "google_pubsub_subscription" "audit_events_push" {
+  name    = "audit-events-processor-push"
+  topic   = google_pubsub_topic.audit_change_events.id
+  project = google_project.projects["infra"].project_id
+
+  push_config {
+    push_endpoint = "${google_cloud_run_v2_service.event_processor.uri}/events/audit"
+    oidc_token {
+      service_account_email = google_service_account.event_processor_invoker_sa.email
+    }
+  }
+
+  ack_deadline_seconds       = 60
+  message_retention_duration = "600s"
+
+  dead_letter_policy {
+    dead_letter_topic     = google_pubsub_topic.event_processor_dlq.id
+    max_delivery_attempts = 5
+  }
+
+  retry_policy {
+    minimum_backoff = "10s"
+    maximum_backoff = "300s"
+  }
+}
+
+resource "google_cloud_run_v2_service_iam_member" "event_processor_invoker" {
+  project  = google_project.projects["infra"].project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.event_processor.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.event_processor_invoker_sa.email}"
+}
+
+resource "google_project_iam_member" "event_processor_firestore" {
+  project = google_project.projects["infra"].project_id
+  role    = "roles/datastore.user"
+  member  = "serviceAccount:${google_service_account.event_processor_sa.email}"
+}
+
+resource "google_project_iam_member" "event_processor_tasks_enqueuer" {
+  project = google_project.projects["infra"].project_id
+  role    = "roles/cloudtasks.enqueuer"
+  member  = "serviceAccount:${google_service_account.event_processor_sa.email}"
+}
+
+resource "google_project_iam_member" "event_processor_secret_accessor" {
+  project = google_project.projects["infra"].project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.event_processor_sa.email}"
 }

@@ -31,3 +31,21 @@ variable "neo4j_password" {
   type        = string
   sensitive   = true
 }
+
+variable "neo4j_bolt_uri" {
+  description = "Bolt URI for the Neo4j instance (e.g. bolt://10.0.0.5:7687)"
+  type        = string
+  default     = ""
+}
+
+variable "event_processor_image" {
+  description = "Docker image URI for the event processor Cloud Run service"
+  type        = string
+  default     = "gcr.io/PROJECT_ID/scc-event-processor:latest"
+}
+
+variable "scheduler_service_url" {
+  description = "Base URL of the scheduler/webhook Cloud Run service"
+  type        = string
+  default     = ""
+}
