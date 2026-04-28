@@ -73,6 +73,34 @@ export const getAuditLog = (customerId: string, limit = 50, pageToken?: string) 
     `/audit?customer_id=${customerId}&limit=${limit}${pageToken ? `&page_token=${pageToken}` : ""}`
   );
 
+// ----- Rollback -----
+
+export const rollbackApproval = (approvalId: string) =>
+  request<{ status: string; output?: string }>(`/rollback/${approvalId}`, {
+    method: "POST",
+  });
+
+// ----- Policies -----
+
+export const getPolicies = (customerId: string) =>
+  request<ExecutionPolicy[]>(`/policies/${customerId}`);
+
+export const upsertPolicy = (customerId: string, policy: ExecutionPolicy) =>
+  request<ExecutionPolicy>(`/policies/${customerId}`, {
+    method: "POST",
+    body: JSON.stringify(policy),
+  });
+
+export const deletePolicy = (customerId: string, policyId: string) =>
+  request<{ deleted: boolean }>(`/policies/${customerId}/${policyId}`, {
+    method: "DELETE",
+  });
+
+export const simulatePolicy = (customerId: string, policyId: string) =>
+  request<PolicySimulationResult>(`/policies/${customerId}/${policyId}/simulate`, {
+    method: "POST",
+  });
+
 // ----- Types -----
 
 export interface LabelFilter { key: string; value: string }
@@ -204,4 +232,25 @@ export interface SimulationResult extends ValidationResult {
     max_blast_radius: number;
     dry_run_active: boolean;
   };
+}
+
+export interface ExecutionPolicy {
+  policy_id: string;
+  customer_id: string;
+  remediation_type: string;
+  severity_levels: string[];
+  finding_categories: string[];
+  asset_label_conditions: Record<string, string>;
+  min_confidence_threshold: number;
+  max_blast_radius: string;
+  tier: 1 | 2;
+  active: boolean;
+}
+
+export interface PolicySimulationResult {
+  findings_evaluated: number;
+  would_execute_tier1: number;
+  would_execute_tier2: number;
+  would_execute_tier3: number;
+  edge_cases: string[];
 }

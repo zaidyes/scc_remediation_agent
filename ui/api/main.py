@@ -239,6 +239,10 @@ async def get_pending_approvals(customer_id: str = Query(...)):
             "expires_at": expires_at.isoformat() if hasattr(expires_at, "isoformat") else str(expires_at),
             "channels_notified": d.get("channels_notified", []),
             "escalation_count": d.get("escalation_count", 0),
+            "confidence_score": d.get("confidence_score"),
+            "execution_tier": d.get("execution_tier"),
+            "preflight_results": d.get("plan", {}).get("preflight_results", []),
+            "executed_at": d.get("executed_at").isoformat() if hasattr(d.get("executed_at"), "isoformat") else d.get("executed_at"),
         })
 
     return {"approvals": approvals}
@@ -337,6 +341,159 @@ async def get_audit_log(
 
     next_token = last_doc.id if last_doc and len(entries) == limit else None
     return {"entries": entries, "next_page_token": next_token}
+
+
+# ---------------------------------------------------------------------------
+# Rollback route
+# ---------------------------------------------------------------------------
+
+@app.post("/api/rollback/{approval_id}")
+async def trigger_rollback(approval_id: str):
+    """
+    Executes the stored rollback artifact for an approval.
+    Proxies to rollback_tools; only valid within 24 hours of execution.
+    """
+    from app.tools.rollback_tools import execute_rollback
+    result = await execute_rollback(approval_id)
+    if result["status"] == "FAILED":
+        raise HTTPException(status_code=400, detail=result.get("output", "Rollback failed"))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Policies CRUD + simulation
+# ---------------------------------------------------------------------------
+
+@app.get("/api/policies/{customer_id}")
+async def list_policies(customer_id: str):
+    """Returns all execution policies stored on the customer config."""
+    config_doc = db().collection("configs").document(customer_id).get()
+    if not config_doc.exists:
+        raise HTTPException(status_code=404, detail="Config not found")
+    raw_policies = config_doc.to_dict().get("policies", [])
+    return raw_policies
+
+
+@app.post("/api/policies/{customer_id}")
+async def upsert_policy(customer_id: str, body: dict):
+    """
+    Creates or replaces a single execution policy on the customer config.
+    Identifies the policy by policy_id; inserts if new, replaces if existing.
+    """
+    from config.policies import ExecutionPolicy as PolicyModel
+
+    try:
+        policy = PolicyModel(**body)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    config_ref = db().collection("configs").document(customer_id)
+    config_doc = config_ref.get()
+    if not config_doc.exists:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    current = config_doc.to_dict()
+    policies: list = current.get("policies", [])
+    policy_dict = policy.model_dump()
+
+    idx = next((i for i, p in enumerate(policies) if p.get("policy_id") == policy.policy_id), None)
+    if idx is not None:
+        policies[idx] = policy_dict
+    else:
+        policies.append(policy_dict)
+
+    config_ref.update({"policies": policies})
+    return policy_dict
+
+
+@app.delete("/api/policies/{customer_id}/{policy_id}")
+async def remove_policy(customer_id: str, policy_id: str):
+    """Removes a single execution policy by policy_id."""
+    config_ref = db().collection("configs").document(customer_id)
+    config_doc = config_ref.get()
+    if not config_doc.exists:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    policies = config_doc.to_dict().get("policies", [])
+    new_policies = [p for p in policies if p.get("policy_id") != policy_id]
+
+    if len(new_policies) == len(policies):
+        raise HTTPException(status_code=404, detail="Policy not found")
+
+    config_ref.update({"policies": new_policies})
+    return {"deleted": True, "policy_id": policy_id}
+
+
+@app.post("/api/policies/{customer_id}/{policy_id}/simulate")
+async def simulate_policy(customer_id: str, policy_id: str):
+    """
+    Runs a 30-day dry-run simulation of a single policy against recent Firestore
+    audit log entries. Returns tier distribution and edge cases.
+    """
+    from config.policies import ExecutionPolicy as PolicyModel
+
+    config_doc = db().collection("configs").document(customer_id).get()
+    if not config_doc.exists:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    config_data = config_doc.to_dict()
+    policy_raw = next(
+        (p for p in config_data.get("policies", []) if p.get("policy_id") == policy_id),
+        None,
+    )
+    if not policy_raw:
+        raise HTTPException(status_code=404, detail="Policy not found")
+
+    policy = PolicyModel(**policy_raw)
+
+    import datetime
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=30)
+    findings_docs = (
+        db().collection("findings")
+        .where("event_time", ">=", cutoff.isoformat())
+        .stream()
+    )
+
+    tier1 = tier2 = tier3 = 0
+    edge_cases: list[str] = []
+
+    for doc in findings_docs:
+        f = doc.to_dict()
+        blast = f.get("blast_level", "HIGH")
+        matched = policy.matches(f, blast)
+        if not matched:
+            tier3 += 1
+            continue
+
+        confidence = f.get("confidence_score")
+        if confidence is None:
+            tier3 += 1
+            edge_cases.append(
+                f"No confidence score for {f.get('finding_id', doc.id)[:8]}… — defaulted to Tier 3"
+            )
+            continue
+
+        if confidence < policy.min_confidence_threshold:
+            tier3 += 1
+            edge_cases.append(
+                f"Confidence {confidence:.0%} below threshold for {f.get('category', 'unknown')} "
+                f"on {f.get('resource_name', '')[-40:]}"
+            )
+            continue
+
+        if policy.tier == 1:
+            tier1 += 1
+        else:
+            tier2 += 1
+
+    total = tier1 + tier2 + tier3
+    return {
+        "findings_evaluated": total,
+        "would_execute_tier1": tier1,
+        "would_execute_tier2": tier2,
+        "would_execute_tier3": tier3,
+        "edge_cases": edge_cases[:20],
+    }
 
 
 # ---------------------------------------------------------------------------

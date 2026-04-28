@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { getActiveFindings, getPendingApprovals, respondToApproval, Finding, Approval } from '../api/config';
+import ConfidenceScore from '../components/ConfidenceScore';
+import PreflightChecklist from '../components/PreflightChecklist';
+import RollbackButton from '../components/RollbackButton';
 
 const CUSTOMER_ID = (window as any).__CUSTOMER_ID__ ?? 'default';
 
@@ -78,7 +81,7 @@ export default function Dashboard() {
             {approvals.map(approval => (
               <div key={approval.approval_id} className="px-5 py-4 flex items-start gap-4">
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${SEVERITY_COLORS[approval.severity] ?? 'bg-gray-100 text-gray-600'}`}>
                       {approval.severity}
                     </span>
@@ -96,6 +99,19 @@ export default function Dashboard() {
                   <p className="text-sm font-medium text-gray-900 truncate">{approval.asset_name.split('/').pop()}</p>
                   <p className="text-xs text-gray-500 truncate mt-0.5">{approval.plan_summary}</p>
                   <p className="text-xs text-gray-400 mt-1">Expires {new Date(approval.expires_at).toLocaleString()}</p>
+                  <div className="mt-2">
+                    <ConfidenceScore score={(approval as any).confidence_score} tier={(approval as any).execution_tier} size="sm" />
+                  </div>
+                  {(approval as any).preflight_results?.length > 0 && (
+                    <div className="mt-2">
+                      <PreflightChecklist results={(approval as any).preflight_results} />
+                    </div>
+                  )}
+                  {(approval as any).executed_at && (
+                    <div className="mt-2">
+                      <RollbackButton approvalId={approval.approval_id} executedAt={(approval as any).executed_at} />
+                    </div>
+                  )}
                 </div>
                 <div className="flex gap-2 flex-shrink-0">
                   <button
