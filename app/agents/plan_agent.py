@@ -12,6 +12,7 @@ from google.cloud import asset_v1
 from google.genai import types
 
 from app.agents.preflight_agent import PreflightAgent
+from app.tools.agent_output import compact_impact_for_plan
 from app.tools.context_budget import budget_json, budget_str, BUDGETS
 from config.schema import RemediationMode
 
@@ -90,7 +91,7 @@ class PlanAgent:
             preflight_json=budget_json(preflight_results, BUDGETS["preflight"], "preflight"),
             resource_data_json=budget_json(resource_data, BUDGETS["resource_data"], "resource_data"),
             finding_json=budget_json(finding, BUDGETS["finding"], "finding"),
-            impact_json=budget_json(impact, BUDGETS["impact"], "impact"),
+            impact_json=budget_json(compact_impact_for_plan(impact), BUDGETS["impact"], "impact"),
             remediation_text=budget_str(
                 finding.get("remediation_text", "No guidance available."), 2_000, "remediation_text"
             ),

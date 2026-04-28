@@ -18,6 +18,7 @@ from app.agents.plan_agent import PlanAgent
 from app.agents.verify_agent import VerifyAgent
 from app.hooks import fire
 import app.hooks as hooks
+from app.tools.agent_output import compact_impact_for_approval, compact_impact_for_scoring
 from app.tools.approval_tools import dispatch_approval_request
 from app.tools.confidence import compute_confidence_score
 from app.tools.osconfig_tools import create_patch_job
@@ -89,8 +90,9 @@ async def _process_finding(
     await fire(hooks.POST_PLAN, {**base_ctx, "plan": plan, "plan_id": plan.get("plan_id")})
 
     # ── Confidence scoring ───────────────────────────────────────────────────
-    blast_level     = impact_result.get("blast_level", "HIGH")
-    dormancy_class  = impact_result.get("dormancy_class", "ACTIVE")
+    scoring_impact  = compact_impact_for_scoring(impact_result)
+    blast_level     = scoring_impact.get("blast_level", "HIGH")
+    dormancy_class  = dormancy_result.get("dormancy_class", scoring_impact.get("dormancy_class", "ACTIVE"))
     preflight_results: list[dict] = plan.get("preflight_results", [])
 
     historical_outcomes = await _get_historical_outcomes(
@@ -368,7 +370,7 @@ async def _dispatch_for_approval(
     approval_id = await dispatch_approval_request(
         plan=plan,
         finding=finding,
-        impact=impact,
+        impact=compact_impact_for_approval(impact),
         config=config,
         channels=config.approval_policy.notification_channels,
         tier=tier,

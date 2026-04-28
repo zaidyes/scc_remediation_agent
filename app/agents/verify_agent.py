@@ -15,6 +15,7 @@ import uuid
 from google.cloud import asset_v1, network_management_v1, osconfig_v1
 from google.cloud.network_management_v1 import ConnectivityTest, Endpoint
 
+from app.tools.agent_output import compact_plan_for_verify
 from app.tools.scc_tools import get_finding_detail, mute_resolved_finding
 from app.tools.graph_tools import update_resource_finding_state
 from app.tools.regression_monitor import monitor_for_regression
@@ -29,6 +30,9 @@ class VerifyAgent:
         Runs type-specific verification, then launches the regression monitor
         as a background task. Returns immediately after verification is confirmed.
         """
+        # Compact to only the fields this agent actually reads — strips steps,
+        # rollback_steps, preflight_results, confidence_score, summary, etc.
+        plan = compact_plan_for_verify(plan)
         remediation_type = plan.get("remediation_type", "")
 
         dispatch = {

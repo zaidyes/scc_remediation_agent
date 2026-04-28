@@ -423,6 +423,67 @@ CustomerConfig(
 
 ---
 
+## Agent harness architecture
+
+The agent pipeline follows the five-layer harness pattern from the Claude Code architecture (arXiv 2604.14228). Three of the five layers are active in this codebase.
+
+### Layer 1 — Context budget truncation (`app/tools/context_budget.py`)
+
+Large GCP resource payloads (GKE clusters, VPCs) can exceed 200 KB of raw JSON. Every section injected into an LLM prompt is serialised through a three-stage budget reducer before the API call:
+
+| Stage | Strategy | Trigger |
+|-------|----------|---------|
+| 1 | Full pretty-print (indent=2) | Fits within budget → return immediately |
+| 2 | Field pruning + compact JSON | Remove `selfLink`, `etag`, `fingerprint`, `kind`, `id`; strip GCE metadata startup scripts; cap lists to 5 items |
+| 3 | Hard character truncation | Last resort; appends `[CONTEXT_BUDGET: '...' truncated — N chars removed]` so the model knows data was cut |
+
+Per-section budgets are tunable via env vars:
+
+| Section | Default | Env var |
+|---------|---------|---------|
+| `resource_data` (CAI blob) | 32,000 chars | `CONTEXT_BUDGET_RESOURCE_DATA` |
+| `impact` (blast radius output) | 16,000 chars | `CONTEXT_BUDGET_IMPACT` |
+| `preflight` (pre-flight results) | 8,000 chars | `CONTEXT_BUDGET_PREFLIGHT` |
+| `finding` (SCC finding JSON) | 4,000 chars | `CONTEXT_BUDGET_FINDING` |
+
+### Layer 2 — Dynamic tool pool assembly (`app/agent.py`)
+
+Each impact sub-agent receives only the tools relevant to its remediation type, reducing schema tokens per model call and eliminating wrong-tool hallucinations.
+
+| Type | Tools included | Tools excluded |
+|------|---------------|----------------|
+| `OS_PATCH` | blast_radius, dependency_chain, dormancy | iam_paths, network_exposure |
+| `IAM` | blast_radius, iam_paths, dormancy | network_exposure, dependency_chain |
+| `FIREWALL` | blast_radius, dependency_chain, network_exposure | iam_paths, dormancy |
+| `MISCONFIGURATION` | All tools | — |
+
+Tools can also be blocked globally at runtime via `AGENT_TOOL_DENY_LIST` (comma-separated function names), applied before any agent is constructed.
+
+### Layer 3 — Subagent output compaction (`app/tools/agent_output.py`)
+
+Each sub-agent passes only the fields its downstream consumer actually reads. Compaction is applied at agent boundaries before any data crosses to the next stage.
+
+| Compaction function | Consumer | Fields kept | Typical reduction |
+|---------------------|----------|-------------|-------------------|
+| `compact_impact_for_plan()` | `PlanAgent.generate()` | blast_level, blast_radius_assets, network_exposure_summary, iam_paths[:5], downstream[:10] as name+env+team | ~65% |
+| `compact_impact_for_approval()` | `dispatch_approval_request()` | blast_level, blast_radius_assets, prod/pii counts, internet_exposed | ~80% |
+| `compact_impact_for_scoring()` | `compute_confidence_score()` | blast_level, dormancy_class only | ~95% |
+| `compact_plan_for_verify()` | `VerifyAgent.verify()` | plan_id, finding_id, asset_name, remediation_type, cve_ids, connectivity_test_cases, iam_member, iam_role, blast_radius_assets | ~85% |
+
+### Layer 4 — Per-action permission gate (`app/hooks.py`)
+
+The `_builtin_per_step_safety_recheck` hook fires on every `PRE_STEP` event and re-checks both change-freeze status and Firestore approval liveness before executing each step. If either check fails, the hook sets `stop=True` and the execution loop halts immediately — closing the plan-vs-action safety gap that exists when approval state is only checked at plan time.
+
+### Layer 5 — 24-event hook pipeline (`app/hooks.py`)
+
+All 24 lifecycle events are wired in `app/main.py`. Custom hooks attach via `@hooks.on(event)` or `hooks.register(event, fn)`. Three built-in hooks are registered at import:
+
+- `_builtin_per_step_safety_recheck` — PRE_STEP: change-freeze + approval liveness check
+- `_builtin_audit_writer` — 10 events: structured Firestore audit writes
+- `_builtin_transcript_logger` — POST_IMPACT/POST_PLAN/POST_VERIFY: opt-in agent reasoning transcripts (`AGENT_LOG_REASONING=true`)
+
+---
+
 ## Ingestion schedule
 
 | Job | Schedule | Source |
@@ -451,9 +512,12 @@ scc-remediation-agent/
 │   │   ├── preflight_agent.py  # Deterministic GCP API pre-flight checks
 │   │   └── verify_agent.py     # Type-specific post-execution verification
 │   └── tools/
+│       ├── agent_output.py     # Subagent output compaction functions (Layer 3)
 │       ├── approval_tools.py   # Firestore approval records; Chat/PD/Jira cards
 │       ├── confidence.py       # Confidence score computation
+│       ├── context_budget.py   # Three-stage LLM prompt budget enforcement (Layer 1)
 │       ├── graph_tools.py      # Neo4j query wrappers
+│       ├── hooks.py            # 24-event hook pipeline (Layer 5)
 │       ├── network_tools.py    # Network Intelligence Center wrappers
 │       ├── osconfig_tools.py   # OS Config patch job tools
 │       ├── regression_monitor.py  # Cloud Monitoring baseline + auto-rollback

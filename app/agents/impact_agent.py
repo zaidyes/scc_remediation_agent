@@ -51,4 +51,10 @@ class ImpactAgent:
             "shared_dependency_exposure": shared_exposure[:5],
             "high_criticality_upstream_count": len(high_criticality_upstream),
             "service_account_chain": dependency_chain.get("service_account_chain", [])[:5],
+            # Flat list of asset name strings — used by compaction and regression monitor
+            "blast_radius_assets": [
+                r.get("name") or r.get("asset_name", "")
+                for r in downstream
+                if r.get("name") or r.get("asset_name")
+            ],
         }
