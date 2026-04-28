@@ -160,6 +160,24 @@ async def apply_response(
         task_id = await _enqueue_reanalysis(approval_id, approval_data)
         await approval_ref.update({"reanalysis_task_id": task_id})
 
+        # Emit ON_INVALIDATION hook so the audit log and any custom hooks fire
+        try:
+            from app.hooks import fire, ON_INVALIDATION
+            await fire(ON_INVALIDATION, {
+                "event":              ON_INVALIDATION,
+                "customer_id":        approval_data.get("customer_id", ""),
+                "finding_id":         approval_data.get("finding_id", ""),
+                "approval_id":        approval_id,
+                "invalidation_reason": (
+                    f"{change['change_type']} on {change['asset_name']}"
+                ),
+                "asset_name":         approval_data.get("asset_name", ""),
+                "plan_id":            approval_data.get("plan_id"),
+                "config":             None,
+            })
+        except Exception as _hook_exc:
+            print(f"[invalidation] Hook fire failed: {_hook_exc}")
+
     elif response == "HARD_BLOCK":
         await approval_ref.update({
             "status": "BLOCKED",

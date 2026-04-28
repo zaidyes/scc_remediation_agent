@@ -16,6 +16,8 @@ from app.agents.impact_agent import ImpactAgent
 from app.agents.dormancy_agent import DormancyAgent
 from app.agents.plan_agent import PlanAgent
 from app.agents.verify_agent import VerifyAgent
+from app.hooks import fire
+import app.hooks as hooks
 from app.tools.approval_tools import dispatch_approval_request
 from app.tools.confidence import compute_confidence_score
 from app.tools.osconfig_tools import create_patch_job
@@ -47,12 +49,31 @@ async def _process_finding(
     config: CustomerConfig,
     policies: list[ExecutionPolicy],
 ) -> None:
-    impact_result = await ImpactAgent(config).analyse(finding)
-    dormancy_result = await DormancyAgent(config).check(finding["resource_name"])
+    base_ctx = {
+        "customer_id": config.customer_id,
+        "finding_id":  finding["finding_id"],
+        "finding":     finding,
+        "config":      config,
+    }
 
+    ctx = await fire(hooks.PRE_FINDING, {**base_ctx})
+    if ctx.get("stop"):
+        print(f"[hooks] PRE_FINDING stopped processing {finding['finding_id']}: {ctx.get('stop_reason', '')}")
+        return
+
+    # ── Impact + dormancy ────────────────────────────────────────────────────
+    await fire(hooks.PRE_IMPACT, {**base_ctx})
+    impact_result   = await ImpactAgent(config).analyse(finding)
+    dormancy_result = await DormancyAgent(config).check(finding["resource_name"])
+    await fire(hooks.POST_IMPACT, {**base_ctx, "impact": impact_result, "dormancy": dormancy_result})
+
+    # ── Plan generation ──────────────────────────────────────────────────────
+    await fire(hooks.PRE_PLAN, {**base_ctx})
     plan = await PlanAgent(config).generate(finding, impact_result, dormancy_result)
+
     if plan is None:
         print(f"[plan] No applicable remediation mode for {finding['finding_id']} — skipping")
+        await fire(hooks.POST_FINDING, {**base_ctx, "outcome": "no_plan"})
         return
 
     if plan.get("status") == "BLOCKED":
@@ -60,13 +81,16 @@ async def _process_finding(
             f"[plan] BLOCKED for {finding['finding_id']}: {plan.get('block_reason')} "
             f"— escalating to Tier 3 for human resolution"
         )
+        await fire(hooks.ON_BLOCK, {**base_ctx, "plan": plan, "block_reason": plan.get("block_reason")})
         await _dispatch_for_approval(plan, finding, impact_result, config, tier=3)
+        await fire(hooks.POST_FINDING, {**base_ctx, "outcome": "blocked"})
         return
 
-    blast_level = impact_result.get("blast_level", "HIGH")
-    dormancy_class = impact_result.get("dormancy_class", "ACTIVE")
+    await fire(hooks.POST_PLAN, {**base_ctx, "plan": plan, "plan_id": plan.get("plan_id")})
 
-    # Pre-flight results are now embedded in the plan by PlanAgent Phase 1
+    # ── Confidence scoring ───────────────────────────────────────────────────
+    blast_level     = impact_result.get("blast_level", "HIGH")
+    dormancy_class  = impact_result.get("dormancy_class", "ACTIVE")
     preflight_results: list[dict] = plan.get("preflight_results", [])
 
     historical_outcomes = await _get_historical_outcomes(
@@ -74,7 +98,6 @@ async def _process_finding(
         finding.get("finding_class", ""),
         plan.get("remediation_type", ""),
     )
-
     confidence = compute_confidence_score(
         preflight_results=preflight_results,
         blast_level=blast_level,
@@ -84,6 +107,8 @@ async def _process_finding(
     )
     plan["confidence_score"] = confidence
 
+    # ── Tier decision ────────────────────────────────────────────────────────
+    await fire(hooks.PRE_TIER_DECISION, {**base_ctx, "plan": plan, "confidence": confidence})
     tier = _determine_execution_tier(
         finding=finding,
         blast_level=blast_level,
@@ -92,21 +117,28 @@ async def _process_finding(
         policies=policies,
         config=config,
     )
-
     print(
         f"[tier] Finding {finding['finding_id']} → Tier {tier} "
-        f"(confidence={confidence}, blast={blast_level})"
+        f"(confidence={confidence:.0%}, blast={blast_level})"
     )
+    await fire(hooks.POST_TIER_DECISION, {**base_ctx, "plan": plan, "tier": tier, "confidence": confidence})
 
+    # ── Dispatch ─────────────────────────────────────────────────────────────
     if tier == 1:
-        print(f"[tier1] Autonomously executing {finding['finding_id']}")
-        await _execute_plan(plan, finding, config)
+        if config.dry_run:
+            await fire(hooks.ON_DRY_RUN, {**base_ctx, "plan": plan, "tier": tier})
+            print(f"[dry-run] Would execute Tier 1 plan {plan['plan_id']} for {finding['finding_id']}")
+        else:
+            print(f"[tier1] Autonomously executing {finding['finding_id']}")
+            await _execute_plan(plan, finding, config)
     elif tier == 2:
         print(f"[tier2] Sending policy-assisted approval card for {finding['finding_id']}")
         await _dispatch_for_approval(plan, finding, impact_result, config, tier=2)
     else:
         print(f"[tier3] Escalating {finding['finding_id']} for expert review")
         await _dispatch_for_approval(plan, finding, impact_result, config, tier=3)
+
+    await fire(hooks.POST_FINDING, {**base_ctx, "plan": plan, "tier": tier, "outcome": "dispatched"})
 
 
 def _determine_execution_tier(
@@ -143,9 +175,7 @@ def _determine_execution_tier(
 
     # Find the highest-priority matching policy
     matching_policy = _find_matching_policy(finding, blast_level, policies)
-
     if matching_policy is None:
-        # No policy covers this finding — default to Tier 3
         return 3
 
     warn_count = sum(1 for r in preflight_results if r.get("result") == "WARN")
@@ -184,32 +214,133 @@ def _find_matching_policy(
     return None
 
 
-async def _execute_plan(plan: dict, finding: dict, config: CustomerConfig) -> None:
+async def _execute_plan(
+    plan: dict,
+    finding: dict,
+    config: CustomerConfig,
+    approval_id: str | None = None,
+) -> None:
+    """
+    Executes a remediation plan step by step.
+
+    Each step passes through the PRE_STEP hook before execution.
+    PRE_STEP re-checks change freeze and approval liveness on every step —
+    mirroring the per-action permission gate in the Claude Code harness.
+    If PRE_STEP sets stop=True the execution loop halts immediately.
+    """
     if config.dry_run:
         print(f"[dry-run] Would execute plan {plan['plan_id']} for {finding['finding_id']}")
         return
 
+    base_ctx = {
+        "customer_id": config.customer_id,
+        "finding_id":  finding["finding_id"],
+        "plan_id":     plan.get("plan_id"),
+        "finding":     finding,
+        "plan":        plan,
+        "config":      config,
+        "approval_id": approval_id,
+    }
+
+    await fire(hooks.PRE_EXECUTE, {**base_ctx})
+
     remediation_type = plan.get("remediation_type")
+    steps = plan.get("steps", [])
+    steps_completed = 0
 
     if remediation_type == "OS_PATCH":
-        job_name = create_patch_job(
-            project_id=_extract_project(finding["resource_name"]),
-            asset_name=finding["resource_name"],
-            cve_ids=finding.get("cve_ids", []),
-            config=config,
+        # OS_PATCH is a single atomic operation (patch job)
+        steps = steps or [{"order": 1, "action": "create_patch_job", "command": ""}]
+
+    for step in steps:
+        # ── Per-step permission gate ─────────────────────────────────────
+        step_ctx = await fire(
+            hooks.PRE_STEP,
+            {**base_ctx, "step": step, "steps_completed": steps_completed},
         )
-        print(f"[execute] Patch job created: {job_name}")
-        if job_name:
-            result = await VerifyAgent(config).verify(plan)
-            print(f"[verify] {result}")
-    else:
-        # MISCONFIGURATION, IAM, FIREWALL direct execution comes in Phase 2/3
-        # (requires rollback artifact creation first). Escalate to Tier 2 for now.
-        print(
-            f"[execute] {remediation_type} direct execution not yet implemented "
-            f"— escalating to Tier 2 approval"
-        )
-        await _dispatch_for_approval(plan, finding, {}, config, tier=2)
+        if step_ctx.get("stop"):
+            reason = step_ctx.get("stop_reason", "hook_stopped")
+            print(
+                f"[execute] PRE_STEP halted execution at step "
+                f"{step.get('order', steps_completed + 1)}: {reason}"
+            )
+            await fire(hooks.ON_STEP_FAILURE, {
+                **base_ctx,
+                "step": step,
+                "steps_completed": steps_completed,
+                "error": reason,
+            })
+            await fire(hooks.POST_EXECUTE, {**base_ctx, "steps_completed": steps_completed, "halted": True})
+            return
+
+        # ── Execute the step ─────────────────────────────────────────────
+        try:
+            if remediation_type == "OS_PATCH":
+                job_name = create_patch_job(
+                    project_id=_extract_project(finding["resource_name"]),
+                    asset_name=finding["resource_name"],
+                    cve_ids=finding.get("cve_ids", []),
+                    config=config,
+                )
+                step_result = {"job_name": job_name, "status": "submitted"}
+                print(f"[execute] Patch job created: {job_name}")
+            else:
+                # MISCONFIGURATION, IAM, FIREWALL — steps are structured commands
+                # from plan["steps"]; executor dispatches by step["action"]
+                step_result = await _dispatch_step(step, finding, config)
+
+            steps_completed += 1
+            await fire(hooks.POST_STEP, {**base_ctx, "step": step, "result": step_result})
+
+        except Exception as exc:
+            print(f"[execute] Step {step.get('order', '?')} failed: {exc}")
+            await fire(hooks.ON_STEP_FAILURE, {
+                **base_ctx,
+                "step": step,
+                "steps_completed": steps_completed,
+                "error": str(exc),
+            })
+            await fire(hooks.POST_EXECUTE, {**base_ctx, "steps_completed": steps_completed, "halted": True})
+            return
+
+    # ── Verification ─────────────────────────────────────────────────────
+    await fire(hooks.PRE_VERIFY, {**base_ctx, "steps_completed": steps_completed})
+    try:
+        verify_result = await VerifyAgent(config).verify(plan)
+        print(f"[verify] {verify_result}")
+        await fire(hooks.POST_VERIFY, {**base_ctx, "verify_result": verify_result, "steps_completed": steps_completed})
+    except Exception as exc:
+        print(f"[verify] Verification failed: {exc}")
+        await fire(hooks.ON_VERIFY_FAILURE, {**base_ctx, "error": str(exc), "steps_completed": steps_completed})
+
+    await fire(hooks.POST_EXECUTE, {**base_ctx, "steps_completed": steps_completed, "halted": False})
+
+
+async def _dispatch_step(step: dict, finding: dict, config: CustomerConfig) -> dict:
+    """
+    Dispatches a single structured remediation step.
+    Called for FIREWALL, IAM, and MISCONFIGURATION plan steps.
+    Steps contain: order, action, command (gcloud / API call), rollback_command.
+    """
+    action = step.get("action", "")
+    command = step.get("command", "")
+
+    if not command:
+        print(f"[execute] Step {step.get('order', '?')}: no command specified — skipping")
+        return {"status": "skipped", "reason": "no_command"}
+
+    import subprocess
+    result = subprocess.run(
+        command,
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Step '{action}' failed (rc={result.returncode}): {result.stderr[:500]}")
+
+    return {"status": "success", "stdout": result.stdout[:500], "returncode": result.returncode}
 
 
 async def _dispatch_for_approval(
@@ -219,6 +350,21 @@ async def _dispatch_for_approval(
     config: CustomerConfig,
     tier: int = 3,
 ) -> None:
+    base_ctx = {
+        "customer_id": config.customer_id,
+        "finding_id":  finding["finding_id"],
+        "finding":     finding,
+        "plan":        plan,
+        "plan_id":     plan.get("plan_id"),
+        "config":      config,
+        "tier":        tier,
+    }
+
+    ctx = await fire(hooks.PRE_APPROVAL_DISPATCH, {**base_ctx})
+    if ctx.get("stop"):
+        print(f"[hooks] PRE_APPROVAL_DISPATCH stopped dispatch: {ctx.get('stop_reason', '')}")
+        return
+
     approval_id = await dispatch_approval_request(
         plan=plan,
         finding=finding,
@@ -228,6 +374,7 @@ async def _dispatch_for_approval(
         tier=tier,
     )
     print(f"[approval] Dispatched Tier {tier} approval request {approval_id}")
+    await fire(hooks.POST_APPROVAL_DISPATCH, {**base_ctx, "approval_id": approval_id})
 
 
 async def _get_historical_outcomes(
