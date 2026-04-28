@@ -187,6 +187,81 @@ When satisfied, disable dry-run in the Config UI.
 
 ---
 
+## CLI
+
+The `scc-agent` CLI provides terminal access to the agent. It has two operation modes:
+
+- **Local** (default) — connects directly to GCP using Application Default Credentials
+- **Remote** (`--api-url`) — routes calls to a deployed scheduler Cloud Run service
+
+### Installation
+
+```bash
+pip install -e .       # installs the scc-agent command
+# or run directly:
+python cli.py <command>
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `chat` | Start an interactive ADK terminal session (`adk run app`) |
+| `run` | Trigger the full remediation batch cycle |
+| `status` | List approvals with colour-coded table output |
+| `approve <id>` | Approve a PENDING remediation; enqueues execution |
+| `reject <id>` | Reject a PENDING remediation |
+| `rollback <id>` | Execute the stored rollback artifact (24 h window) |
+| `finding <id>` | Show SCC finding details |
+
+### Usage examples
+
+```bash
+# Interactive terminal session (same as adk run app)
+scc-agent chat
+
+# Run the batch remediation cycle locally
+scc-agent run --customer-id acme-prod
+
+# Show all pending approvals
+scc-agent status --customer-id acme-prod --filter PENDING
+
+# Approve or reject from the terminal
+scc-agent approve apv-abc123 --customer-id acme-prod
+scc-agent reject  apv-abc123 --customer-id acme-prod
+
+# Roll back an executed remediation (prompts for confirmation)
+scc-agent rollback apv-abc123
+scc-agent rollback apv-abc123 --yes   # skip prompt
+
+# Show finding details
+scc-agent finding find-001 --org-id 123456789
+
+# JSON output for scripting
+scc-agent status --customer-id acme-prod --format json | jq '.[] | select(.blast_level=="CRITICAL")'
+```
+
+### Remote mode
+
+Point `--api-url` at a deployed scheduler or UI API Cloud Run service. The CLI fetches an OIDC identity token automatically when running on GCE/Cloud Run. For local terminals, authenticate with `gcloud auth application-default login` first.
+
+```bash
+export API_URL=https://scheduler-abc-uc.a.run.app
+
+scc-agent status  --api-url $API_URL --customer-id acme-prod
+scc-agent approve apv-abc123 --api-url $API_URL
+scc-agent rollback apv-abc123 --api-url $API_URL
+```
+
+### Environment variables
+
+| Variable | Used by |
+|----------|---------|
+| `CUSTOMER_ID` | Default value for `--customer-id` |
+| `ORG_ID` | Default value for `--org-id` |
+
+---
+
 ## Three-tier execution
 
 | Tier | Name | Trigger | Approval |
@@ -564,6 +639,7 @@ scc-remediation-agent/
 │           ├── Policies.tsx    # Policy CRUD + 30-day simulation
 │           ├── ConfigWizard.tsx
 │           └── AuditLog.tsx
+├── cli.py                          # scc-agent CLI (local + remote mode)
 ├── scripts/
 │   └── demo.sh                 # End-to-end demo provisioning script
 ├── infrastructure/
