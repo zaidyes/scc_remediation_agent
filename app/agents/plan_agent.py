@@ -12,6 +12,7 @@ from google.cloud import asset_v1
 from google.genai import types
 
 from app.agents.preflight_agent import PreflightAgent
+from app.tools.context_budget import budget_json, budget_str, BUDGETS
 from config.schema import RemediationMode
 
 _FINDING_CLASS_TO_MODE: dict[str, str] = {
@@ -86,11 +87,13 @@ class PlanAgent:
         # Phase 2 — Configuration-specific plan generation (LLM)
         # ------------------------------------------------------------------- #
         prompt = _PLAN_PROMPT.format(
-            preflight_json=json.dumps(preflight_results, indent=2),
-            resource_data_json=json.dumps(resource_data, indent=2, default=str),
-            finding_json=json.dumps(finding, indent=2, default=str),
-            impact_json=json.dumps(impact, indent=2),
-            remediation_text=finding.get("remediation_text", "No guidance available."),
+            preflight_json=budget_json(preflight_results, BUDGETS["preflight"], "preflight"),
+            resource_data_json=budget_json(resource_data, BUDGETS["resource_data"], "resource_data"),
+            finding_json=budget_json(finding, BUDGETS["finding"], "finding"),
+            impact_json=budget_json(impact, BUDGETS["impact"], "impact"),
+            remediation_text=budget_str(
+                finding.get("remediation_text", "No guidance available."), 2_000, "remediation_text"
+            ),
             enabled_modes=", ".join(enabled_modes),
             dry_run=self.config.dry_run,
         )

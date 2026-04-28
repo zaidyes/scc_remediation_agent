@@ -1,10 +1,33 @@
+"""
+ADK agent definitions for the SCC Remediation Agent.
+
+Tool pool assembly follows the Claude Code harness pattern (arXiv 2604.14228):
+each sub-agent receives only the tools relevant to its role and the remediation
+type being processed — reducing context cost and eliminating wrong-tool
+hallucinations.
+
+Assembly pipeline (3 of the paper's 5 steps; MCP/dedup added when needed):
+  1. Base enumeration  — all available tools per agent role
+  2. Type filtering    — restrict to tools relevant for the remediation type
+  3. Deny-rule filter  — strip any tool blocked by the deny list
+
+Static module-level agents (root_agent, triage_agent, verify_agent) are used by
+agents-cli and ADK interactive mode. build_impact_agent() and build_plan_agent()
+return type-specific instances for the batch pipeline (app/agents/*.py).
+"""
 import os
+from typing import Literal
 
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
 
 from app.tools.scc_tools import get_finding_detail, mute_resolved_finding
-from app.tools.graph_tools import query_blast_radius, query_iam_paths, check_dormancy, query_dependency_chain
+from app.tools.graph_tools import (
+    query_blast_radius,
+    query_iam_paths,
+    check_dormancy,
+    query_dependency_chain,
+)
 from app.tools.network_tools import get_network_exposure
 from app.tools.osconfig_tools import create_patch_job
 from app.tools.approval_tools import dispatch_approval_request
@@ -19,61 +42,205 @@ from app.prompts import (
 _MODEL = os.getenv("MODEL_ID", "gemini-3-flash-preview")
 _PLANNING_MODEL = os.getenv("PLANNING_MODEL_ID", "gemini-3.1-pro-preview")
 
+RemediationType = Literal["OS_PATCH", "FIREWALL", "IAM", "MISCONFIGURATION"] | None
+
+# ---------------------------------------------------------------------------
+# Tool pool definitions — Step 1: base enumeration + Step 2: type filtering
+# ---------------------------------------------------------------------------
+#
+# Each pool contains only the tools that are meaningful for that remediation type.
+# Tools that are irrelevant to a type add schema tokens to every model call with
+# no benefit, and create surface area for the model to call the wrong tool.
+#
+# Key decisions:
+#   OS_PATCH    — blast radius + dependency chain to find prod dependents;
+#                 NO IAM paths (not relevant for patch planning);
+#                 NO network exposure (not a connectivity change)
+#   IAM         — blast radius + IAM paths for lateral movement analysis;
+#                 NO network exposure; NO dependency chain (graph traversal
+#                 for IAM findings is about permission, not infra deps)
+#   FIREWALL    — blast radius + network exposure + dependency chain;
+#                 NO IAM paths (firewall rules don't change IAM bindings)
+#   MISCONFIGURATION — all tools; findings span many resource types
+#
+# The root_agent's impact sub-agents include all four types so ADK's routing
+# LLM can select the right one based on the finding description.
+
+_IMPACT_TOOL_POOLS: dict[str | None, list] = {
+    "OS_PATCH": [
+        FunctionTool(query_blast_radius),
+        FunctionTool(query_dependency_chain),
+        FunctionTool(check_dormancy),
+    ],
+    "IAM": [
+        FunctionTool(query_blast_radius),
+        FunctionTool(query_iam_paths),
+        FunctionTool(check_dormancy),
+    ],
+    "FIREWALL": [
+        FunctionTool(query_blast_radius),
+        FunctionTool(query_dependency_chain),
+        FunctionTool(get_network_exposure),
+    ],
+    "MISCONFIGURATION": [
+        FunctionTool(query_blast_radius),
+        FunctionTool(query_iam_paths),
+        FunctionTool(check_dormancy),
+        FunctionTool(query_dependency_chain),
+        FunctionTool(get_network_exposure),
+    ],
+    # None = no type known; use full pool (interactive / ADK fallback)
+    None: [
+        FunctionTool(query_blast_radius),
+        FunctionTool(query_iam_paths),
+        FunctionTool(check_dormancy),
+        FunctionTool(query_dependency_chain),
+        FunctionTool(get_network_exposure),
+    ],
+}
+
+# Root agent tools — dispatch_approval_request is always present;
+# create_patch_job is OS_PATCH only (no other remediation type needs it on root)
+_ROOT_TOOL_POOLS: dict[str | None, list] = {
+    "OS_PATCH": [
+        FunctionTool(dispatch_approval_request),
+        FunctionTool(create_patch_job),
+    ],
+    "IAM": [
+        FunctionTool(dispatch_approval_request),
+    ],
+    "FIREWALL": [
+        FunctionTool(dispatch_approval_request),
+    ],
+    "MISCONFIGURATION": [
+        FunctionTool(dispatch_approval_request),
+    ],
+    None: [
+        FunctionTool(dispatch_approval_request),
+        FunctionTool(create_patch_job),
+    ],
+}
+
+# ---------------------------------------------------------------------------
+# Step 3: Deny-rule filter
+# ---------------------------------------------------------------------------
+# Tools listed here are stripped from every pool regardless of type.
+# Add tool function names to block them globally (e.g. during incident mode).
+
+_DENY_LIST: frozenset[str] = frozenset(
+    t.strip()
+    for t in os.environ.get("AGENT_TOOL_DENY_LIST", "").split(",")
+    if t.strip()
+)
+
+
+def _apply_deny_list(tools: list) -> list:
+    """Removes any FunctionTool whose underlying function name is in _DENY_LIST."""
+    if not _DENY_LIST:
+        return tools
+    return [t for t in tools if t.func.__name__ not in _DENY_LIST]
+
+
+# ---------------------------------------------------------------------------
+# Agent factories
+# ---------------------------------------------------------------------------
+
+def build_impact_agent(remediation_type: RemediationType = None) -> Agent:
+    """
+    Returns an impact Agent with a tool pool scoped to the remediation type.
+    Called by the batch pipeline (app/agents/impact_agent.py) to avoid
+    passing irrelevant tools to the model.
+    """
+    tools = _apply_deny_list(_IMPACT_TOOL_POOLS.get(remediation_type, _IMPACT_TOOL_POOLS[None]))
+    type_label = remediation_type or "general"
+    return Agent(
+        model=_MODEL,
+        name=f"impact_agent_{type_label.lower()}",
+        description=(
+            f"Blast-radius analysis for {type_label} findings: "
+            + {
+                "OS_PATCH":         "downstream dependencies and asset dormancy.",
+                "IAM":              "lateral movement paths and permission exposure.",
+                "FIREWALL":         "network exposure and connectivity impact.",
+                "MISCONFIGURATION": "full graph traversal across all dimensions.",
+            }.get(type_label, "graph traversal and exposure analysis.")
+        ),
+        instruction=IMPACT_AGENT_INSTRUCTION,
+        tools=tools,
+        output_key="impact_agent_output",
+    )
+
+
+def build_plan_agent(remediation_type: RemediationType = None) -> Agent:
+    """
+    Returns a plan Agent. Currently plan_agent uses no ADK tools (it makes
+    direct Gemini calls in app/agents/plan_agent.py with pre-fetched data),
+    but the factory is provided so type-specific planning instructions can
+    be injected in future without changing call sites.
+    """
+    return Agent(
+        model=_PLANNING_MODEL,
+        name=f"plan_agent_{(remediation_type or 'general').lower()}",
+        description=f"Generates a remediation plan for {remediation_type or 'any'} findings.",
+        instruction=PLAN_AGENT_INSTRUCTION,
+        tools=[],
+        output_key="plan_agent_output",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Static agents — used by agents-cli and ADK interactive mode
+# ---------------------------------------------------------------------------
+
 triage_agent = Agent(
     model=_MODEL,
     name="triage_agent",
     description="Assesses SCC finding scope, severity, dormancy and attack exposure.",
     instruction=TRIAGE_AGENT_INSTRUCTION,
-    tools=[
+    tools=_apply_deny_list([
         FunctionTool(get_finding_detail),
         FunctionTool(check_dormancy),
-    ],
+    ]),
     output_key="triage_agent_output",
 )
 
-impact_agent = Agent(
-    model=_MODEL,
-    name="impact_agent",
-    description="Performs blast-radius analysis: downstream deps, IAM paths, network exposure.",
-    instruction=IMPACT_AGENT_INSTRUCTION,
-    tools=[
-        FunctionTool(query_blast_radius),
-        FunctionTool(query_iam_paths),
-        FunctionTool(query_dependency_chain),
-        FunctionTool(get_network_exposure),
-    ],
-    output_key="impact_agent_output",
-)
+# For interactive mode: one impact agent per finding type — ADK's routing LLM
+# picks the right one based on the finding's category description.
+_impact_agent_os_patch      = build_impact_agent("OS_PATCH")
+_impact_agent_iam           = build_impact_agent("IAM")
+_impact_agent_firewall      = build_impact_agent("FIREWALL")
+_impact_agent_misconfiguration = build_impact_agent("MISCONFIGURATION")
 
-plan_agent = Agent(
-    model=_PLANNING_MODEL,
-    name="plan_agent",
-    description="Generates a structured, step-by-step remediation plan with rollback steps.",
-    instruction=PLAN_AGENT_INSTRUCTION,
-    tools=[],
-    output_key="plan_agent_output",
-)
+plan_agent = build_plan_agent()
 
 verify_agent = Agent(
     model=_MODEL,
     name="verify_agent",
     description="Confirms remediation success and mutes resolved SCC findings.",
     instruction=VERIFY_AGENT_INSTRUCTION,
-    tools=[
+    tools=_apply_deny_list([
         FunctionTool(get_finding_detail),
         FunctionTool(mute_resolved_finding),
-    ],
+    ]),
     output_key="verify_agent_output",
 )
 
 root_agent = Agent(
     model=_MODEL,
     name="scc_remediation_agent",
-    description="Orchestrates triage, impact analysis, remediation planning and verification for GCP SCC findings.",
+    description=(
+        "Orchestrates triage, impact analysis, remediation planning and verification "
+        "for GCP Security Command Center findings."
+    ),
     instruction=ROOT_AGENT_INSTRUCTION,
-    tools=[
-        FunctionTool(dispatch_approval_request),
-        FunctionTool(create_patch_job),
+    tools=_apply_deny_list(_ROOT_TOOL_POOLS[None]),
+    sub_agents=[
+        triage_agent,
+        _impact_agent_os_patch,
+        _impact_agent_iam,
+        _impact_agent_firewall,
+        _impact_agent_misconfiguration,
+        plan_agent,
+        verify_agent,
     ],
-    sub_agents=[triage_agent, impact_agent, plan_agent, verify_agent],
 )
