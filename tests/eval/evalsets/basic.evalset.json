@@ -4,6 +4,7 @@
   "eval_cases": [
     {
       "eval_id": "critical_vuln_triage",
+      "description": "CRITICAL OS vulnerability on a prod instance — should escalate to Tier 3 (high blast radius, prod env).",
       "conversation": [
         {
           "user_content": {
@@ -19,7 +20,182 @@
         "app_name": "app",
         "user_id": "secops_eval_user",
         "state": {}
-      }
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "check_dormancy"},
+        {"tool_name": "query_blast_radius"}
+      ]
+    },
+    {
+      "eval_id": "iam_overpermissive_finding",
+      "description": "HIGH IAM finding — service account with owner role on prod project. Should detect lateral movement paths and request Tier 3 approval.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "SCC flagged an IAM finding: service account batch-worker@prod-project.iam.gserviceaccount.com has roles/owner on projects/prod-project. Severity: HIGH."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "query_iam_paths"},
+        {"tool_name": "query_blast_radius"}
+      ]
+    },
+    {
+      "eval_id": "open_firewall_rule_high_blast",
+      "description": "HIGH firewall misconfiguration — allow-all-ingress rule on a VPC serving prod services. Should detect network exposure and request approval.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "There's a HIGH severity finding: firewall rule allow-all-ingress on prod-vpc allows 0.0.0.0/0 on all ports. This rule affects several production services."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "query_blast_radius"},
+        {"tool_name": "get_network_exposure"}
+      ]
+    },
+    {
+      "eval_id": "dev_instance_patch_tier1_candidate",
+      "description": "CRITICAL CVE on a dormant dev instance with no downstream prod dependencies — confidence should be high, Tier 1 candidate if policy allows.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "CVE-2024-1234 (CVSS 9.8) detected on batch-worker-dev-1 in the dev environment. The instance has been idle for 3 weeks and has no downstream prod dependencies. What is the risk level and what action should we take?"
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "check_dormancy"},
+        {"tool_name": "query_blast_radius"}
+      ]
+    },
+    {
+      "eval_id": "blocked_plan_change_freeze",
+      "description": "CRITICAL finding on a resource with change-freeze=true label — pre-flight should BLOCK the plan and escalate to Tier 3 regardless of confidence.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "CRITICAL CVE-2024-5678 on api-server-prod-1. Note: this instance has the change-freeze=true label applied — the platform team is in the middle of a migration."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "query_blast_radius"}
+      ]
+    },
+    {
+      "eval_id": "out_of_scope_finding_filtered",
+      "description": "Finding on a project not in the customer's scope — triage should filter it out without proceeding to impact analysis or plan generation.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "HIGH severity OS_VULNERABILITY on legacy-vm-1 in out-of-scope-project. Should we remediate this?"
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"}
+      ]
+    },
+    {
+      "eval_id": "dry_run_mode_no_execution",
+      "description": "In dry-run mode, the agent should describe the plan it would execute but must not call create_patch_job or any mutating API.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "Dry run mode is enabled. CRITICAL CVE-2024-1234 on compute-instance-dev-2. Show me the remediation plan that would be executed."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "query_blast_radius"}
+      ]
+    },
+    {
+      "eval_id": "verified_remediation_mutes_finding",
+      "description": "After a successful patch job, the agent should confirm CVEs are cleared via OS Config vulnerability report and mute the SCC finding.",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "Patch job patch-job-abc123 completed on compute-instance-dev-2. Please verify that CVE-2024-1234 has been remediated and close the finding."
+              }
+            ]
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "app",
+        "user_id": "secops_eval_user",
+        "state": {}
+      },
+      "expected_tool_use": [
+        {"tool_name": "get_finding_detail"},
+        {"tool_name": "mute_resolved_finding"}
+      ]
     }
   ]
 }
