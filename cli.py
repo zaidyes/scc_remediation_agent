@@ -596,7 +596,9 @@ async def _run_agent_turn(
                     label = _TOOL_LABELS.get(fc.name, f"Running {fc.name}...")
                     sp.update(label)
 
-            # Collect final text
+            # Collect final text from any agent.
+            # Sub-agent JSON (triage_agent_output etc.) is translated to a
+            # brief stage indicator by _translate_pipeline_json() before display.
             if event.is_final_response() and event.content:
                 for part in event.content.parts:
                     if part.text:
@@ -611,6 +613,98 @@ async def _run_agent_turn(
 
 
 _URL_RE = re.compile(r"https?://[^\s\)\]\"'>]+")
+
+# Internal output keys written by sub-agents — never shown raw to users
+_PIPELINE_KEYS = {
+    "triage_agent_output": ("Triage",   lambda d: _fmt_triage(d)),
+    "impact_agent_output": ("Impact",   lambda d: _fmt_impact(d)),
+    "plan_agent_output":   ("Plan",     lambda d: _fmt_plan(d)),
+    "verify_agent_output": ("Verify",   lambda d: _fmt_verify(d)),
+}
+
+
+def _fmt_triage(d: dict) -> str:
+    sev     = d.get("severity", "")
+    dormant = d.get("is_dormant")
+    score   = d.get("attack_exposure_score")
+    rat     = d.get("rationale", "")
+    parts = []
+    if sev:
+        parts.append(f"Severity: {sev}")
+    if dormant is not None:
+        parts.append("asset is dormant" if dormant else "asset is active")
+    if score is not None:
+        parts.append(f"attack exposure {score}")
+    if rat:
+        parts.append(rat)
+    return "  ".join(parts) if parts else "complete"
+
+
+def _fmt_impact(d: dict) -> str:
+    level   = d.get("blast_level", "")
+    count   = d.get("blast_radius_count") or len(d.get("blast_radius_assets", []))
+    exposed = d.get("internet_exposed")
+    parts = []
+    if level:
+        parts.append(f"Blast radius: {level}")
+    if count:
+        parts.append(f"{count} downstream resource{'s' if count != 1 else ''}")
+    if exposed:
+        parts.append("internet-exposed")
+    return "  ·  ".join(parts) if parts else "complete"
+
+
+def _fmt_plan(d: dict) -> str:
+    status     = d.get("status", "")
+    confidence = d.get("confidence", "")
+    steps      = len(d.get("steps", []))
+    downtime   = d.get("estimated_downtime_minutes")
+    blocked    = d.get("block_reason", "")
+    if status == "BLOCKED":
+        return f"BLOCKED — {blocked}"
+    parts = []
+    if confidence:
+        parts.append(f"Confidence: {confidence}")
+    if steps:
+        parts.append(f"{steps} step{'s' if steps != 1 else ''}")
+    if downtime is not None:
+        parts.append(f"~{downtime} min downtime")
+    return "  ·  ".join(parts) if parts else "ready"
+
+
+def _fmt_verify(d: dict) -> str:
+    status = d.get("status", "")
+    return status if status else "complete"
+
+
+def _translate_pipeline_json(text: str) -> str:
+    """
+    If `text` is (or contains) a JSON block with a known pipeline output key,
+    replace it with a concise human-readable stage indicator.
+    Otherwise return text unchanged.
+    """
+    import json
+
+    # Strip markdown code fences if present
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-z]*\n?", "", stripped)
+        stripped = re.sub(r"\n?```$", "", stripped)
+        stripped = stripped.strip()
+
+    try:
+        obj = json.loads(stripped)
+    except (ValueError, TypeError):
+        return text  # not JSON — return as-is
+
+    for key, (stage_name, formatter) in _PIPELINE_KEYS.items():
+        if key in obj:
+            detail = formatter(obj[key])
+            icon = _c("✓", _GREEN, _BOLD)
+            label = _c(f"{stage_name}", _BOLD)
+            return f"{icon} {label}  {_c(detail, _GREY)}"
+
+    return text  # JSON but not a known pipeline key
 
 
 def _linkify(text: str) -> str:
@@ -628,6 +722,7 @@ def _linkify(text: str) -> str:
 def _print_agent_response(text: str) -> None:
     if not text:
         return
+    text = _translate_pipeline_json(text)
     tw = max(_term_width() - 6, 40)
     print()
     print(_c("  Agent  ›", _GREY))
@@ -640,6 +735,17 @@ def _print_agent_response(text: str) -> None:
             if stripped in seen:
                 continue
             seen.add(stripped)
+            # Render markdown section headers (## / ###) as bold coloured labels
+            if stripped.startswith("### "):
+                label = stripped[4:].strip()
+                print()
+                print("    " + _c(label.upper(), _BOLD, _GREY))
+                continue
+            if stripped.startswith("## "):
+                label = stripped[3:].strip()
+                print()
+                print("    " + _c(label, _BOLD, _CYAN))
+                continue
             # Never wrap lines that contain a URL — wrapping breaks clickable links
             if _URL_RE.search(line):
                 print("    " + _linkify(line))
