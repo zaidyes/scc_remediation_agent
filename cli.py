@@ -583,31 +583,48 @@ async def _run_agent_turn(
 
     tool_names_seen: set[str] = set()
 
-    with _Spinner(spinner_msg) as sp:
-        async for event in runner.run_async(
-            user_id="cli",
-            session_id=session.id,
-            new_message=content,
-        ):
-            # Update spinner with a human-readable label for the tool being called
-            for fc in (event.get_function_calls() or []):
-                if fc.name not in tool_names_seen:
-                    tool_names_seen.add(fc.name)
-                    label = _TOOL_LABELS.get(fc.name, f"Running {fc.name}...")
-                    sp.update(label)
+    try:
+        with _Spinner(spinner_msg) as sp:
+            async for event in runner.run_async(
+                user_id="cli",
+                session_id=session.id,
+                new_message=content,
+            ):
+                # Update spinner with a human-readable label for the tool being called
+                for fc in (event.get_function_calls() or []):
+                    if fc.name not in tool_names_seen:
+                        tool_names_seen.add(fc.name)
+                        label = _TOOL_LABELS.get(fc.name, f"Running {fc.name}...")
+                        sp.update(label)
 
-            # Collect final text from any agent.
-            # Sub-agent JSON (triage_agent_output etc.) is translated to a
-            # brief stage indicator by _translate_pipeline_json() before display.
-            if event.is_final_response() and event.content:
-                for part in event.content.parts:
-                    if part.text:
-                        response_parts.append(part.text)
+                # Collect final text from any agent.
+                # Sub-agent JSON (triage_agent_output etc.) is translated to a
+                # brief stage indicator by _translate_pipeline_json() before display.
+                if event.is_final_response() and event.content:
+                    for part in event.content.parts:
+                        if part.text:
+                            response_parts.append(part.text)
 
-            # Collect token usage (last event wins)
-            if event.usage_metadata:
-                prompt_tok  = event.usage_metadata.prompt_token_count      or 0
-                output_tok  = event.usage_metadata.candidates_token_count  or 0
+                # Collect token usage (last event wins)
+                if event.usage_metadata:
+                    prompt_tok  = event.usage_metadata.prompt_token_count      or 0
+                    output_tok  = event.usage_metadata.candidates_token_count  or 0
+
+    except ValueError as exc:
+        # ADK raises ValueError when the model hallucinates a tool name that
+        # isn't registered. Surface it as a recoverable error rather than crashing.
+        err_msg = str(exc)
+        if "not found" in err_msg and "Available tools" in err_msg:
+            # Extract the hallucinated name for a cleaner message
+            import re as _re
+            m = _re.search(r"Tool '([^']+)' not found", err_msg)
+            tool_name = m.group(1) if m else "unknown"
+            response_parts.append(
+                f"I tried to call a tool called `{tool_name}` which doesn't exist. "
+                "Please rephrase your request and I'll try a different approach."
+            )
+        else:
+            raise
 
     return "".join(response_parts).strip(), prompt_tok, output_tok
 
