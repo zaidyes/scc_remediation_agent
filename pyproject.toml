@@ -4,14 +4,14 @@ version = "0.1.0"
 description = "Autonomous GCP security remediation agent powered by Google ADK"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "google-adk>=1.0.0",
     "google-genai>=1.0.0",
     "google-auth>=2.0.0",
     "google-cloud-asset>=3.0.0",
     "google-cloud-securitycenter>=1.0.0",
-    "google-cloud-osconfig>=1.0.0",
+    "google-cloud-os-config>=1.0.0",
     "google-cloud-secret-manager>=2.0.0",
     "neo4j>=5.0.0",
     "pydantic>=2.0.0",
@@ -28,8 +28,11 @@ dependencies = [
 scc-agent = "cli:main"
 
 [build-system]
-requires = ["uv_build>=0.6.6,<0.7"]
-build-backend = "uv_build"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "config", "graph", "scheduler", "cli.py"]
 
 [tool.uv.sources]
 # agents-cli is installed separately via: uvx google-agents-cli setup
