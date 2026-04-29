@@ -735,6 +735,64 @@ For deployment outside Agent Garden, use the [Quickstart](#quickstart) above.
 
 ---
 
+## Planned: security validation layers
+
+Three deterministic validation layers are planned between plan generation and execution. None of these require an additional LLM call — they are static analysis and live API checks applied to the plan's structured output.
+
+```
+plan_agent output
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer A — Policy engine  (app/agents/plan_agent.py)            │
+│  Validates semantic intent against the plan's structured fields  │
+│                                                                  │
+│  · remediation_type ∈ allowed types for this customer config     │
+│  · Action is RESTRICT not EXPAND (for firewall/IAM findings)     │
+│  · change_window_required=true → verify inside maintenance window│
+│  · blast_level HIGH/CRITICAL → require approval before continuing│
+└─────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer B — Command compiler  (app/tools/command_compiler.py)     │
+│  Validates each api_call string before it leaves the system      │
+│                                                                  │
+│  · Command is in the gcloud subcommand whitelist                 │
+│  · --project flag matches the finding's project (no scope creep) │
+│  · Resource name in the command matches finding's asset_name     │
+│  · No destructive flags (--delete, --remove-all, --clear-all)    │
+│    unless explicitly expected for the remediation type           │
+└─────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer C — Dry-run validation loop  (app/agents/plan_agent.py)   │
+│  Catches version drift and renamed flags that static analysis     │
+│  cannot — uses the live GCP API as the validator                 │
+│                                                                  │
+│  · Run each api_call with --dry-run / --validate-only            │
+│  · If error → re-prompt plan_agent with error in context         │
+│  · Max 2 retries → plan status set to BLOCKED if still failing   │
+│                                                                  │
+│  Why: LLM training data has a cutoff. APIs retire (SCC v1→v2),  │
+│  gcloud flags rename, Terraform provider schemas change. The     │
+│  model doesn't know what it doesn't know. Dry-run catches this   │
+│  at validation time rather than execution time.                  │
+└─────────────────────────────────────────────────────────────────┘
+    │
+    ▼  All three PASS → present plan to user / dispatch_approval
+       Any FAIL → plan.status = BLOCKED, reason surfaced to user
+```
+
+### What was considered and rejected
+
+**Intent-first (separate LLM call):** The plan schema already captures intent in `summary`, `remediation_type`, and `steps[].action`. Generating intent separately would reproduce these fields at 2× latency with no additional safety guarantee. Policy validation (Layer A) achieves the same check deterministically against fields that already exist.
+
+**Schema injection per call:** Fetching `gcloud [subcommand] --help` before every plan generation is expensive and slow. Layer C (dry-run loop) solves the same problem — it uses the live API as the validator rather than trying to replicate its schema in the prompt.
+
+---
+
 ## Contributing
 
 Contributions welcome. Please open an issue before starting significant work.
