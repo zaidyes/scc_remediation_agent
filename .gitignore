@@ -30,3 +30,4 @@ ui/dist/
 
 # Research papers / local docs
 *.pdf
+app/.adk/
