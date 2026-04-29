@@ -507,6 +507,7 @@ def cmd_models(args):
 
 _SLASH_HELP = """\
   /help           show this message
+  /model          list available models and switch the active model
   /status         show pending approvals (uses --customer-id from session)
   /finding <id>   show details for a finding ID
   /clear          clear the screen
@@ -569,16 +570,17 @@ async def _run_agent_turn(
     output_tok = 0
     # Human-readable labels for each tool call shown in the spinner
     _TOOL_LABELS: dict[str, str] = {
-        "list_active_findings":    "Fetching active findings from SCC...",
-        "get_finding_detail":      "Looking up finding details...",
-        "mute_resolved_finding":   "Muting resolved finding...",
-        "query_blast_radius":      "Analysing blast radius...",
-        "query_iam_paths":         "Checking IAM privilege paths...",
-        "check_dormancy":          "Checking asset activity...",
-        "query_dependency_chain":  "Mapping resource dependencies...",
-        "get_network_exposure":    "Assessing network exposure...",
+        "list_active_findings":      "Fetching active findings from SCC...",
+        "get_finding_detail":        "Looking up finding details...",
+        "mute_resolved_finding":     "Muting resolved finding...",
+        "query_blast_radius":        "Analysing blast radius...",
+        "query_iam_paths":           "Checking IAM privilege paths...",
+        "check_dormancy":            "Checking asset activity...",
+        "query_dependency_chain":    "Mapping resource dependencies...",
+        "get_network_exposure":      "Assessing network exposure...",
+        "validate_plan":             "Validating remediation plan...",
         "dispatch_approval_request": "Sending approval request...",
-        "create_patch_job":        "Scheduling patch job...",
+        "create_patch_job":          "Scheduling patch job...",
     }
 
     tool_names_seen: set[str] = set()
@@ -853,6 +855,81 @@ def _print_agent_response(text: str) -> None:
             print()
 
 
+def _slash_model() -> str | None:
+    """
+    /model slash command handler.
+    Fetches available models, shows a numbered list with the active model
+    highlighted, lets the user pick new flash and pro models, then:
+      1. Updates os.environ immediately (affects this process).
+      2. Mutates root_agent.model in place so the change takes effect on
+         the very next message — no restart needed.
+      3. Writes MODEL_ID / PLANNING_MODEL_ID to .env for future sessions.
+
+    Returns the new MODEL_ID string if changed, else None.
+    """
+    sys.path.insert(0, os.path.dirname(__file__) or ".")
+    try:
+        from scripts.discover_models import (
+            discover_models, print_model_table,
+            select_models_interactive, write_env_models,
+        )
+    except ImportError as exc:
+        _err(f"Cannot import discover_models: {exc}")
+        return None
+
+    print()
+    with _Spinner("Querying available models..."):
+        try:
+            models = discover_models()
+        except Exception as exc:
+            _err(str(exc))
+            return None
+
+    current_flash = os.environ.get("MODEL_ID", "")
+    current_pro   = os.environ.get("PLANNING_MODEL_ID", "")
+    print_model_table(models, current_flash, current_pro)
+
+    selected  = select_models_interactive(models)
+    new_flash = selected.get("flash", current_flash)
+    new_pro   = selected.get("pro",   current_pro)
+
+    if new_flash == current_flash and new_pro == current_pro:
+        _hint("No change.")
+        return None
+
+    # Update process environment for any code that reads it after this point
+    if new_flash:
+        os.environ["MODEL_ID"] = new_flash
+    if new_pro:
+        os.environ["PLANNING_MODEL_ID"] = new_pro
+
+    # Try to mutate root_agent.model in place — makes the change live immediately
+    # without restarting the session
+    live = False
+    try:
+        from app.agent import root_agent
+        root_agent.model = new_flash
+        live = True
+    except Exception:
+        pass
+
+    # Persist to .env so future sessions inherit the choice
+    env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
+    try:
+        write_env_models(new_flash or current_flash, new_pro or current_pro, env_path)
+    except Exception:
+        pass
+
+    print()
+    suffix = " — active now" if live else f" — saved to {env_path}, restart to apply"
+    _ok("Model updated" + suffix)
+    kw = 14
+    print(f"  {_c('Flash'.ljust(kw), _GREY)}  {_c(new_flash, _CYAN)}")
+    print(f"  {_c('Pro (planning)'.ljust(kw), _GREY)}  {_c(new_pro, _CYAN)}")
+    print()
+    return new_flash
+
+
 async def _chat_loop(org_id: str, customer_id: str) -> None:
     from google.adk.runners import InMemoryRunner
 
@@ -932,6 +1009,11 @@ async def _chat_loop(org_id: str, customer_id: str) -> None:
                 continue
             if cmd == "clear":
                 print("\033[2J\033[H", end="")
+                continue
+            if cmd == "model":
+                new_m = _slash_model()
+                if new_m:
+                    model_id = new_m
                 continue
             if cmd == "status" and customer_id:
                 approvals = _get_approvals_local(customer_id, "PENDING", limit=10)

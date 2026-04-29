@@ -31,6 +31,7 @@ from app.tools.graph_tools import (
 from app.tools.network_tools import get_network_exposure
 from app.tools.osconfig_tools import create_patch_job
 from app.tools.approval_tools import dispatch_approval_request
+from app.tools.validate_plan_tool import validate_plan
 from app.prompts import (
     TRIAGE_AGENT_INSTRUCTION,
     IMPACT_AGENT_INSTRUCTION,
@@ -103,34 +104,63 @@ _IMPACT_TOOL_POOLS: dict[str | None, list] = {
 # get_finding_detail is on root so "tell me more" stays with root and doesn't
 # route to triage_agent (which always outputs JSON);
 # create_patch_job is OS_PATCH only.
-_LIST_FINDINGS_TOOL   = FunctionTool(list_active_findings)
-_GET_FINDING_TOOL     = FunctionTool(get_finding_detail)
+_LIST_FINDINGS_TOOL        = FunctionTool(list_active_findings)
+_GET_FINDING_TOOL          = FunctionTool(get_finding_detail)
+_VALIDATE_PLAN_TOOL        = FunctionTool(validate_plan)
+_BLAST_RADIUS_TOOL         = FunctionTool(query_blast_radius)
+_DEPENDENCY_CHAIN_TOOL     = FunctionTool(query_dependency_chain)
+_IAM_PATHS_TOOL            = FunctionTool(query_iam_paths)
+_NETWORK_EXPOSURE_TOOL     = FunctionTool(get_network_exposure)
+
+# Root agent ad-hoc query tools — present on root so the model can answer
+# dependency/exposure questions directly when a user asks outside the formal
+# pipeline (e.g. "what services depend on this rule?").
+_ROOT_ADHOC_TOOLS = [
+    _BLAST_RADIUS_TOOL,
+    _DEPENDENCY_CHAIN_TOOL,
+    _IAM_PATHS_TOOL,
+    _NETWORK_EXPOSURE_TOOL,
+]
 
 _ROOT_TOOL_POOLS: dict[str | None, list] = {
     "OS_PATCH": [
         _LIST_FINDINGS_TOOL,
         _GET_FINDING_TOOL,
+        _VALIDATE_PLAN_TOOL,
+        _BLAST_RADIUS_TOOL,
+        _DEPENDENCY_CHAIN_TOOL,
         FunctionTool(dispatch_approval_request),
         FunctionTool(create_patch_job),
     ],
     "IAM": [
         _LIST_FINDINGS_TOOL,
         _GET_FINDING_TOOL,
+        _VALIDATE_PLAN_TOOL,
+        _BLAST_RADIUS_TOOL,
+        _IAM_PATHS_TOOL,
         FunctionTool(dispatch_approval_request),
     ],
     "FIREWALL": [
         _LIST_FINDINGS_TOOL,
         _GET_FINDING_TOOL,
+        _VALIDATE_PLAN_TOOL,
+        _BLAST_RADIUS_TOOL,
+        _DEPENDENCY_CHAIN_TOOL,
+        _NETWORK_EXPOSURE_TOOL,
         FunctionTool(dispatch_approval_request),
     ],
     "MISCONFIGURATION": [
         _LIST_FINDINGS_TOOL,
         _GET_FINDING_TOOL,
+        _VALIDATE_PLAN_TOOL,
+        *_ROOT_ADHOC_TOOLS,
         FunctionTool(dispatch_approval_request),
     ],
     None: [
         _LIST_FINDINGS_TOOL,
         _GET_FINDING_TOOL,
+        _VALIDATE_PLAN_TOOL,
+        *_ROOT_ADHOC_TOOLS,
         FunctionTool(dispatch_approval_request),
         FunctionTool(create_patch_job),
     ],
