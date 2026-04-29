@@ -540,7 +540,7 @@ CustomerConfig
 
 Both are configurable at runtime via `/model` in chat or `scc-agent models --select`.
 
-Gemini 3 models (`gemini-3-flash-preview`, `gemini-3.1-pro-preview`) return 404 on Vertex AI project `gaia-485223` — they require explicit project allowlisting via the Vertex AI model garden.
+Gemini 3 models (`gemini-3-flash-preview`, `gemini-3.1-pro-preview`) are not yet generally available on Vertex AI — they require explicit project allowlisting via the Vertex AI model garden.
 
 ---
 
