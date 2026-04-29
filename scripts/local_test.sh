@@ -151,6 +151,16 @@ if [[ "$MODE" == "B" ]]; then
 fi
 echo "  ✓ .env written"
 
+# ── Step 3b: Verify model access ─────────────────────────────────────────────
+echo ""
+echo "▶ Verifying model access..."
+set -o allexport; source .env; set +o allexport
+if ! uv run python scripts/check_model_access.py; then
+  echo ""
+  echo "  Resolve the error above, then re-run this script."
+  exit 1
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MODE A: Interactive chat only (no local infra needed)
 # ─────────────────────────────────────────────────────────────────────────────
