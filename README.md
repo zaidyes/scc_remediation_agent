@@ -103,6 +103,20 @@ No customer data leaves your GCP organisation.
 
 ---
 
+## Local testing
+
+To test against a real GCP org from your laptop without deploying anything, see **[LOCAL_TESTING.md](LOCAL_TESTING.md)**.
+
+```bash
+# Interactive chat (no local infra needed)
+./scripts/local_test.sh --org-id YOUR_ORG_ID --project YOUR_PROJECT --mode A
+
+# Full dry-run batch pipeline (Docker required)
+./scripts/local_test.sh --org-id YOUR_ORG_ID --project YOUR_PROJECT --mode B
+```
+
+---
+
 ## Prerequisites
 
 - A GCP organisation (not just a project)
