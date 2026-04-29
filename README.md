@@ -216,17 +216,18 @@ The `scc-agent` CLI provides terminal access to the agent. It has two operation 
 ```bash
 pip install -e .       # installs the scc-agent command
 # or run directly:
-python cli.py <command>
+uv run scc-agent <command>
 ```
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `chat` | Start an interactive ADK terminal session (`adk run app`) |
+| `chat` | Interactive REPL — proactively fetches top findings on startup, spinner with human-readable tool progress, per-turn token/model stats, OSC 8 clickable hyperlinks |
+| `models` | List available Gemini flash/pro models ranked newest-first; `--select` to pick and save to `.env` |
 | `run` | Trigger the full remediation batch cycle |
 | `status` | List approvals with colour-coded table output |
-| `approve <id>` | Approve a PENDING remediation; enqueues execution |
+| `approve <id>` | Approve a PENDING remediation; shows preview panel before confirming |
 | `reject <id>` | Reject a PENDING remediation |
 | `rollback <id>` | Execute the stored rollback artifact (24 h window) |
 | `finding <id>` | Show SCC finding details |
@@ -234,8 +235,16 @@ python cli.py <command>
 ### Usage examples
 
 ```bash
-# Interactive terminal session (same as adk run app)
-scc-agent chat
+# Interactive chat — agent auto-fetches top findings on startup
+scc-agent --org-id 123456789 chat
+
+# Ask about a specific finding by number from the startup list, or by ID
+# > tell me more about 3
+# > work on finding 1
+
+# See available Gemini models (queries the API for your project/key)
+scc-agent models
+scc-agent models --select   # interactive picker — writes MODEL_ID / PLANNING_MODEL_ID to .env
 
 # Run the batch remediation cycle locally
 scc-agent run --customer-id acme-prod
@@ -243,7 +252,7 @@ scc-agent run --customer-id acme-prod
 # Show all pending approvals
 scc-agent status --customer-id acme-prod --filter PENDING
 
-# Approve or reject from the terminal
+# Approve or reject from the terminal (shows approval preview before confirming)
 scc-agent approve apv-abc123 --customer-id acme-prod
 scc-agent reject  apv-abc123 --customer-id acme-prod
 
@@ -257,6 +266,17 @@ scc-agent finding find-001 --org-id 123456789
 # JSON output for scripting
 scc-agent status --customer-id acme-prod --format json | jq '.[] | select(.blast_level=="CRITICAL")'
 ```
+
+### Chat REPL features
+
+- **Proactive startup** — automatically calls `list_active_findings` and presents a ranked priority list; no need to supply a finding ID
+- **Plain-English explanations** — "tell me more about N" fetches full detail and explains the finding in 3–5 sentences, with a clickable link to the affected resource in the GCP console
+- **Spinner with context** — shows what the agent is doing in human-readable terms ("Analysing blast radius...", "Looking up finding details...") rather than raw function names
+- **Per-turn stats** — model name, cumulative token count, and elapsed time after each turn
+- **Session summary** — total turns, tokens in/out, and wall-clock duration on exit
+- **Slash commands** — `/help`, `/status`, `/finding <id>`, `/clear`, `/exit`
+- **Ctrl+C anywhere** — clean exit with session summary, whether at the prompt or mid-response
+- **OSC 8 hyperlinks** — URLs (e.g. GCP console links) render as clickable links in iTerm2, VSCode terminal, and other OSC 8–capable terminals
 
 ### Remote mode
 
@@ -276,6 +296,8 @@ scc-agent rollback apv-abc123 --api-url $API_URL
 |----------|---------|
 | `CUSTOMER_ID` | Default value for `--customer-id` |
 | `ORG_ID` | Default value for `--org-id` |
+| `MODEL_ID` | Gemini model for triage/impact/verify agents (default: `gemini-2.5-flash`) |
+| `PLANNING_MODEL_ID` | Gemini model for plan agent (default: `gemini-2.5-pro`) |
 
 ---
 
@@ -658,6 +680,10 @@ scc-remediation-agent/
 │           └── AuditLog.tsx
 ├── cli.py                          # scc-agent CLI (local + remote mode)
 ├── scripts/
+│   ├── local_test.sh           # Mode A/B local test runner
+│   ├── check_model_access.py   # Verifies MODEL_ID / PLANNING_MODEL_ID are accessible
+│   ├── discover_models.py      # Queries API for available Gemini flash/pro models
+│   ├── seed_local_config.py    # Seeds Firestore emulator with a local-test customer config
 │   └── demo.sh                 # End-to-end demo provisioning script
 ├── infrastructure/
 │   ├── setup_feeds.py

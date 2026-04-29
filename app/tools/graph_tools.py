@@ -2,38 +2,61 @@ from neo4j import GraphDatabase, Driver
 from functools import lru_cache
 import os
 
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j.neo4j.svc.cluster.local:7687")
-NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+NEO4J_URI             = os.environ.get("NEO4J_URI",             "bolt://neo4j.neo4j.svc.cluster.local:7687")
+NEO4J_USER            = os.environ.get("NEO4J_USERNAME",        os.environ.get("NEO4J_USER", "neo4j"))
 NEO4J_PASSWORD_SECRET = os.environ.get("NEO4J_PASSWORD_SECRET", "neo4j-password")
+
+# Set to True after the first connection failure so we don't keep retrying on
+# every tool call in Mode A (no local Neo4j).
+_graph_unavailable: bool = False
+
 
 @lru_cache(maxsize=1)
 def _get_driver() -> Driver:
-    password = _read_secret(NEO4J_PASSWORD_SECRET)
+    # NEO4J_PASSWORD (set by .env / local_test.sh) takes precedence over a
+    # Secret Manager secret name, so Mode A works without Secret Manager access.
+    password = os.environ.get("NEO4J_PASSWORD") or _read_secret(NEO4J_PASSWORD_SECRET)
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, password))
+
 
 def _read_secret(secret_id: str) -> str:
     from google.cloud import secretmanager
-    client = secretmanager.SecretManagerServiceClient()
     project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
     if not project_id:
-        return "dummy-password" # For testing/local without setup
+        return "localpassword"
     name = f"projects/{project_id}/secrets/{secret_id}/versions/latest"
     try:
+        client = secretmanager.SecretManagerServiceClient()
         response = client.access_secret_version(request={"name": name})
         return response.payload.data.decode("UTF-8")
     except Exception:
-        return "dummy-password"
+        return "localpassword"
+
 
 def _run_query(cypher: str, params: dict = None) -> list[dict]:
-    driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(cypher, params or {})
-        return [dict(record) for record in result]
+    global _graph_unavailable
+    if _graph_unavailable:
+        return []
+    try:
+        driver = _get_driver()
+        with driver.session() as session:
+            result = session.run(cypher, params or {})
+            return [dict(record) for record in result]
+    except Exception:
+        _graph_unavailable = True
+        return []
+
 
 def _run_write(cypher: str, params: dict = None) -> None:
-    driver = _get_driver()
-    with driver.session() as session:
-        session.execute_write(lambda tx: tx.run(cypher, params or {}))
+    global _graph_unavailable
+    if _graph_unavailable:
+        return
+    try:
+        driver = _get_driver()
+        with driver.session() as session:
+            session.execute_write(lambda tx: tx.run(cypher, params or {}))
+    except Exception:
+        _graph_unavailable = True
 
 # Scope checking
 def get_resource_scope_status(asset_name: str, scope_config) -> dict:
@@ -67,11 +90,13 @@ def get_resource_maint_window(asset_name: str) -> str | None:
 
 # Traversal
 def query_blast_radius(asset_name: str, max_hops: int = 3) -> list[dict]:
+    if _graph_unavailable:
+        return [{"graph_unavailable": True, "note": "Neo4j not running — blast radius unavailable in Mode A"}]
     rows = _run_query(
         f"MATCH path = (vuln:Resource {{asset_name: $asset_name}})-[:CONNECTS_TO|ROUTES_TRAFFIC_TO|DEPENDS_ON|GRANTS_ACCESS_TO|HOSTED_BY|USES_SERVICE_ACCOUNT|IN_SUBNET*1..{max_hops}]->(downstream:Resource) WHERE downstream.asset_name <> $asset_name WITH downstream, min(length(path)) AS hops, collect(DISTINCT [r in relationships(path) | type(r)][0]) AS edge_types RETURN downstream.asset_name AS name, downstream.env AS env, downstream.team AS team, downstream.data_class AS data_class, downstream.asset_type AS asset_type, hops, edge_types ORDER BY hops ASC, downstream.env DESC LIMIT 50",
         {"asset_name": asset_name}
     )
-    return rows
+    return rows if rows else [{"graph_unavailable": True, "note": "No graph data for this asset"}]
 
 def query_dependency_chain(asset_name: str, max_hops: int = 3) -> dict:
     """
@@ -134,6 +159,9 @@ def query_iam_paths(asset_name: str) -> list[dict]:
     return rows
 
 def check_dormancy(asset_name: str) -> dict:
+    if _graph_unavailable:
+        return {"dormancy_class": "UNKNOWN", "dormancy_score": None, "last_activity": None,
+                "status": "UNKNOWN", "graph_unavailable": True}
     rows = _run_query(
         "MATCH (r:Resource {asset_name: $name}) RETURN r.dormancy_score AS dormancy_score, r.last_activity AS last_activity, r.status AS status, CASE WHEN r.dormancy_score > 0.8 THEN 'DORMANT' WHEN r.dormancy_score > 0.4 THEN 'PERIODIC' ELSE 'ACTIVE' END AS dormancy_class",
         {"name": asset_name}

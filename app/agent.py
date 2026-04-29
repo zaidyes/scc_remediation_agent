@@ -21,7 +21,7 @@ from typing import Literal
 from google.adk.agents import Agent
 from google.adk.tools import FunctionTool
 
-from app.tools.scc_tools import get_finding_detail, mute_resolved_finding
+from app.tools.scc_tools import get_finding_detail, mute_resolved_finding, list_active_findings
 from app.tools.graph_tools import (
     query_blast_radius,
     query_iam_paths,
@@ -39,8 +39,8 @@ from app.prompts import (
     ROOT_AGENT_INSTRUCTION,
 )
 
-_MODEL = os.getenv("MODEL_ID", "gemini-3-flash-preview")
-_PLANNING_MODEL = os.getenv("PLANNING_MODEL_ID", "gemini-3.1-pro-preview")
+_MODEL = os.getenv("MODEL_ID", "gemini-2.5-flash")
+_PLANNING_MODEL = os.getenv("PLANNING_MODEL_ID", "gemini-2.5-pro")
 
 RemediationType = Literal["OS_PATCH", "FIREWALL", "IAM", "MISCONFIGURATION"] | None
 
@@ -100,22 +100,37 @@ _IMPACT_TOOL_POOLS: dict[str | None, list] = {
 }
 
 # Root agent tools — dispatch_approval_request is always present;
-# create_patch_job is OS_PATCH only (no other remediation type needs it on root)
+# get_finding_detail is on root so "tell me more" stays with root and doesn't
+# route to triage_agent (which always outputs JSON);
+# create_patch_job is OS_PATCH only.
+_LIST_FINDINGS_TOOL   = FunctionTool(list_active_findings)
+_GET_FINDING_TOOL     = FunctionTool(get_finding_detail)
+
 _ROOT_TOOL_POOLS: dict[str | None, list] = {
     "OS_PATCH": [
+        _LIST_FINDINGS_TOOL,
+        _GET_FINDING_TOOL,
         FunctionTool(dispatch_approval_request),
         FunctionTool(create_patch_job),
     ],
     "IAM": [
+        _LIST_FINDINGS_TOOL,
+        _GET_FINDING_TOOL,
         FunctionTool(dispatch_approval_request),
     ],
     "FIREWALL": [
+        _LIST_FINDINGS_TOOL,
+        _GET_FINDING_TOOL,
         FunctionTool(dispatch_approval_request),
     ],
     "MISCONFIGURATION": [
+        _LIST_FINDINGS_TOOL,
+        _GET_FINDING_TOOL,
         FunctionTool(dispatch_approval_request),
     ],
     None: [
+        _LIST_FINDINGS_TOOL,
+        _GET_FINDING_TOOL,
         FunctionTool(dispatch_approval_request),
         FunctionTool(create_patch_job),
     ],

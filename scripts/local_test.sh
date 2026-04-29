@@ -44,21 +44,26 @@ PROJECT_IDS=""
 SEVERITY="HIGH_PLUS"
 CUSTOMER_ID="local-test"
 MODE="A"
+MODEL_FLASH=""       # empty = keep existing .env value; "auto" = discover latest
+MODEL_PRO=""
 SKIP_INFRA=false
 SKIP_INGESTION=false
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --org-id)        ORG_ID="$2";        shift 2 ;;
-    --project)       PROJECT="$2";       shift 2 ;;
-    --api-key)       API_KEY="$2";       shift 2 ;;
-    --project-ids)   PROJECT_IDS="$2";   shift 2 ;;
-    --severity)      SEVERITY="$2";      shift 2 ;;
-    --customer-id)   CUSTOMER_ID="$2";   shift 2 ;;
-    --mode)          MODE="$2";          shift 2 ;;
-    --skip-infra)    SKIP_INFRA=true;    shift ;;
-    --skip-ingestion) SKIP_INGESTION=true; shift ;;
+    --org-id)          ORG_ID="$2";       shift 2 ;;
+    --project)         PROJECT="$2";      shift 2 ;;
+    --api-key)         API_KEY="$2";      shift 2 ;;
+    --project-ids)     PROJECT_IDS="$2";  shift 2 ;;
+    --severity)        SEVERITY="$2";     shift 2 ;;
+    --customer-id)     CUSTOMER_ID="$2";  shift 2 ;;
+    --mode)            MODE="$2";         shift 2 ;;
+    --model-flash)     MODEL_FLASH="$2";  shift 2 ;;
+    --model-pro)       MODEL_PRO="$2";    shift 2 ;;
+    --model)           MODEL_FLASH="$2"; MODEL_PRO="$2"; shift 2 ;;
+    --skip-infra)      SKIP_INFRA=true;   shift ;;
+    --skip-ingestion)  SKIP_INGESTION=true; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -124,8 +129,8 @@ GOOGLE_CLOUD_PROJECT=local-test
 GOOGLE_CLOUD_LOCATION=us-central1
 ORG_ID=${ORG_ID}
 CUSTOMER_ID=${CUSTOMER_ID}
-MODEL_ID=gemini-3-flash-preview
-PLANNING_MODEL_ID=gemini-3.1-pro-preview
+MODEL_ID=gemini-2.5-flash
+PLANNING_MODEL_ID=gemini-2.5-pro
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=localpassword
@@ -138,8 +143,8 @@ GOOGLE_CLOUD_PROJECT=${PROJECT}
 GOOGLE_CLOUD_LOCATION=us-central1
 ORG_ID=${ORG_ID}
 CUSTOMER_ID=${CUSTOMER_ID}
-MODEL_ID=gemini-3-flash-preview
-PLANNING_MODEL_ID=gemini-3.1-pro-preview
+MODEL_ID=gemini-2.5-flash
+PLANNING_MODEL_ID=gemini-2.5-pro
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=localpassword
@@ -150,6 +155,65 @@ if [[ "$MODE" == "B" ]]; then
   echo "FIRESTORE_EMULATOR_HOST=localhost:8080" >> .env
 fi
 echo "  ✓ .env written"
+
+# ── Step 3a: Resolve model IDs ───────────────────────────────────────────────
+# If --model-flash / --model-pro were passed, override .env values.
+# If either is "auto", discover the latest available model from the API.
+set -o allexport; source .env; set +o allexport
+
+_resolve_auto_model() {
+  local role="$1"   # "flash" or "pro"
+  uv run python - <<PYEOF
+import sys, os
+sys.path.insert(0, '.')
+from scripts.discover_models import discover_models
+try:
+    models = discover_models()
+    items = models.get("$role", [])
+    if items:
+        print(items[0])   # latest
+    else:
+        sys.exit(1)
+except Exception as e:
+    print(f"auto-discovery failed: {e}", file=sys.stderr)
+    sys.exit(1)
+PYEOF
+}
+
+if [[ "$MODEL_FLASH" == "auto" ]]; then
+  echo ""
+  echo "▶ Auto-discovering latest flash model..."
+  MODEL_FLASH=$(_resolve_auto_model flash) || MODEL_FLASH="gemini-3-flash"
+  echo "  ✓ Flash: $MODEL_FLASH"
+fi
+
+if [[ "$MODEL_PRO" == "auto" ]]; then
+  echo ""
+  echo "▶ Auto-discovering latest pro model..."
+  MODEL_PRO=$(_resolve_auto_model pro) || MODEL_PRO="gemini-3-pro"
+  echo "  ✓ Pro:   $MODEL_PRO"
+fi
+
+# Apply any explicit overrides to .env
+if [[ -n "$MODEL_FLASH" && "$MODEL_FLASH" != "auto" ]]; then
+  if grep -q "^MODEL_ID=" .env; then
+    sed -i '' "s|^MODEL_ID=.*|MODEL_ID=${MODEL_FLASH}|" .env
+  else
+    echo "MODEL_ID=${MODEL_FLASH}" >> .env
+  fi
+  echo "  MODEL_ID overridden → ${MODEL_FLASH}"
+fi
+
+if [[ -n "$MODEL_PRO" && "$MODEL_PRO" != "auto" ]]; then
+  if grep -q "^PLANNING_MODEL_ID=" .env; then
+    sed -i '' "s|^PLANNING_MODEL_ID=.*|PLANNING_MODEL_ID=${MODEL_PRO}|" .env
+  else
+    echo "PLANNING_MODEL_ID=${MODEL_PRO}" >> .env
+  fi
+  echo "  PLANNING_MODEL_ID overridden → ${MODEL_PRO}"
+fi
+
+set -o allexport; source .env; set +o allexport
 
 # ── Step 3b: Verify model access ─────────────────────────────────────────────
 echo ""
@@ -167,19 +231,17 @@ fi
 if [[ "$MODE" == "A" ]]; then
   echo ""
   echo "══════════════════════════════════════════════════════"
-  echo "  Mode A — Interactive ADK chat"
+  echo "  Mode A — Interactive CLI chat"
   echo "  The agent will query your real SCC findings and"
   echo "  CAI data. No local database is needed."
-  echo "  Graph-based blast radius will be limited — ask the"
-  echo "  agent about specific findings by resource name."
+  echo "  Graph-based blast radius will be limited."
   echo "══════════════════════════════════════════════════════"
   echo ""
-  echo "Starting interactive session... (Ctrl+C to exit)"
-  echo ""
-  source .env
+  set -o allexport; source .env; set +o allexport
   export GOOGLE_CLOUD_PROJECT GOOGLE_GENAI_USE_VERTEXAI GOOGLE_CLOUD_LOCATION
   export MODEL_ID PLANNING_MODEL_ID NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD
-  uv run adk run app
+  export ORG_ID CUSTOMER_ID
+  uv run scc-agent --org-id "$ORG_ID" --customer-id "$CUSTOMER_ID" chat
   exit 0
 fi
 

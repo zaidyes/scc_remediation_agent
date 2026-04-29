@@ -1,10 +1,11 @@
+from typing import Any
 from google.cloud import osconfig_v1
 
 def create_patch_job(
     project_id: str,
     asset_name: str,
     cve_ids: list[str],
-    config,
+    config: Any,
 ) -> str:
     """
     Creates a GCP OS Config patch job targeting the specific instance.

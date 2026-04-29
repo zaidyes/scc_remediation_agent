@@ -97,15 +97,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
   --mode A
 ```
 
-This starts an ADK chat session (`adk run app`). You can ask the agent things like:
+This starts an interactive `scc-agent chat` session. On startup the agent automatically fetches your top active SCC findings and presents a ranked list — no need to supply a finding ID manually. You can then:
 
 ```
-> What are the most critical SCC findings in my org right now?
-> Tell me about the blast radius of //compute.googleapis.com/projects/my-project/instances/vm1
-> What would the remediation plan be for finding find-001?
+> tell me more about 1          — plain-English explanation + GCP console link
+> work on finding 2             — full triage → impact → plan pipeline
+> all critical                  — process every CRITICAL finding sequentially
+> run everything                — process all returned findings
 ```
 
 The agent will query your real SCC and CAI APIs. Graph-based blast radius queries will return empty since there's no Neo4j, but triage, pre-flight checks, and plan generation all work.
+
+Press **Ctrl+C** at any time (including while the agent is thinking) to exit cleanly and see a session summary.
 
 ---
 
@@ -162,6 +165,38 @@ python -m app --customer-id local-test
 
 # Or interactively:
 scc-agent run --customer-id local-test
+```
+
+---
+
+## Choosing a Gemini model
+
+The script defaults to `gemini-2.5-flash` (fast agent) and `gemini-2.5-pro` (planning). You can override these in three ways:
+
+**1. Auto-discover and pick interactively:**
+```bash
+scc-agent models --select
+# Queries the API, shows ranked list (latest, latest-1…), lets you pick, writes to .env
+```
+
+**2. Auto-discover latest in the script:**
+```bash
+./scripts/local_test.sh --org-id YOUR_ORG_ID --project YOUR_PROJECT --model auto --mode A
+# Picks the newest available flash and pro models and overrides .env
+```
+
+**3. Specify explicitly:**
+```bash
+./scripts/local_test.sh --org-id YOUR_ORG_ID --project YOUR_PROJECT \
+  --model-flash gemini-2.5-flash \
+  --model-pro gemini-2.5-pro \
+  --mode A
+```
+
+To just see what models are available without starting a session:
+```bash
+set -o allexport; source .env; set +o allexport
+scc-agent models
 ```
 
 ---
@@ -251,6 +286,14 @@ Or switch to AI Studio (no project billing needed):
 GOOGLE_GENAI_USE_VERTEXAI=False
 GOOGLE_API_KEY=your-ai-studio-key
 ```
+
+**`404 NOT_FOUND: Publisher Model … was not found`**
+The model ID in `.env` isn't available for your project. Run `scc-agent models` to see
+which models your project can actually access, then update `MODEL_ID` and `PLANNING_MODEL_ID`
+in `.env`, or re-run the script with `--model auto` to pick automatically.
+
+**`400 INVALID_ARGUMENT: Unknown name "additional_properties"`**
+This indicates an ADK version mismatch. Run `uv sync` to restore the pinned dependencies.
 
 **Large org taking too long**
 Add `--project-ids` to restrict ingestion scope, or use `--severity CRITICAL_ONLY` to cut down findings.

@@ -1,16 +1,17 @@
 import uuid
 import datetime
 import json
+from typing import Any
 import aiohttp
 from google.cloud import firestore, tasks_v2
 from googleapiclient.discovery import build
 
 
 async def dispatch_approval_request(
-    plan: dict,
-    finding: dict,
-    impact: dict,
-    config,
+    plan: Any,
+    finding: Any,
+    impact: Any,
+    config: Any,
     channels: list[str],
     tier: int = 3,
 ) -> str:

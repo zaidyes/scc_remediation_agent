@@ -27,33 +27,47 @@ Global options:
 import argparse
 import asyncio
 import datetime
+import itertools
 import json
 import os
+import re
+import shutil
 import sys
 import textwrap
+import threading
+import time
 import urllib.request
 import urllib.error
 
 
 # ---------------------------------------------------------------------------
-# Output helpers
+# Terminal / colour helpers
 # ---------------------------------------------------------------------------
 
 _RESET  = "\033[0m"
 _BOLD   = "\033[1m"
+_DIM    = "\033[2m"
 _GREEN  = "\033[32m"
 _YELLOW = "\033[33m"
 _RED    = "\033[31m"
 _CYAN   = "\033[36m"
+_BLUE   = "\033[34m"
 _GREY   = "\033[90m"
+_WHITE  = "\033[97m"
 
 
 def _supports_color() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
-def _c(text: str, code: str) -> str:
-    return f"{code}{text}{_RESET}" if _supports_color() else text
+def _c(text: str, *codes: str) -> str:
+    if not _supports_color():
+        return text
+    return "".join(codes) + text + _RESET
+
+
+def _term_width() -> int:
+    return shutil.get_terminal_size((80, 24)).columns
 
 
 def _status_color(status: str) -> str:
@@ -66,20 +80,149 @@ def _status_color(status: str) -> str:
         "INVALIDATED": _GREY,
         "ACTIVE":      _RED,
         "INACTIVE":    _GREEN,
+        "STABLE":      _GREEN,
+        "SUCCESS":     _GREEN,
+        "FAILED":      _RED,
     }
     return _c(status, colors.get(status, _RESET))
 
 
-def _blast_color(level: str) -> str:
-    colors = {"LOW": _GREEN, "MEDIUM": _YELLOW, "HIGH": _RED, "CRITICAL": _RED}
-    return _c(level, colors.get(level, _RESET))
+def _severity_badge(sev: str) -> str:
+    badges = {
+        "CRITICAL": (_RED,    "● CRITICAL"),
+        "HIGH":     (_YELLOW, "● HIGH"),
+        "MEDIUM":   (_CYAN,   "● MEDIUM"),
+        "LOW":      (_GREY,   "● LOW"),
+    }
+    code, label = badges.get(sev.upper(), (_GREY, f"● {sev}"))
+    return _c(label, _BOLD, code)
 
+
+def _blast_badge(level: str) -> str:
+    badges = {
+        "CRITICAL": (_RED,    "▲▲ CRITICAL"),
+        "HIGH":     (_RED,    "▲▲ HIGH"),
+        "MEDIUM":   (_YELLOW, "▲  MEDIUM"),
+        "LOW":      (_GREEN,  "▽  LOW"),
+    }
+    code, label = badges.get(level.upper(), (_GREY, level))
+    return _c(label, code)
+
+
+# ---------------------------------------------------------------------------
+# Spinner
+# ---------------------------------------------------------------------------
+
+class _Spinner:
+    """Displays an animated spinner on a background thread while work is done."""
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, message: str):
+        self.message = message
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        for frame in itertools.cycle(self._FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stdout.write(f"\r{_c(frame, _CYAN)}  {self.message}   ")
+            sys.stdout.flush()
+            time.sleep(0.08)
+        # Clear the spinner line
+        sys.stdout.write("\r" + " " * (_term_width() - 1) + "\r")
+        sys.stdout.flush()
+
+    def update(self, message: str) -> None:
+        self.message = message
+
+    def __enter__(self):
+        if _supports_color():
+            self._thread.start()
+        else:
+            print(f"  {self.message}...")
+        return self
+
+    def __exit__(self, *_):
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1)
+
+
+# ---------------------------------------------------------------------------
+# Layout helpers
+# ---------------------------------------------------------------------------
+
+def _panel(title: str, rows: list[tuple[str, str]], width: int | None = None) -> None:
+    """
+    Renders a box-drawn panel:
+      ╭─ Title ──────────────────╮
+      │  Key       value         │
+      ╰──────────────────────────╯
+    """
+    w = min(width or 64, _term_width() - 2)
+    key_w = max((len(k) for k, _ in rows), default=8)
+    inner = w - 2  # excluding the two │ chars
+
+    top = "╭─ " + title + " " + "─" * max(0, inner - len(title) - 3) + "╮"
+    bot = "╰" + "─" * inner + "╯"
+
+    print(_c(top, _GREY))
+    for key, val in rows:
+        label = _c(key.ljust(key_w), _DIM)
+        # Truncate long values to fit the panel
+        max_val = inner - key_w - 4
+        val_display = str(val)
+        if len(val_display) > max_val:
+            val_display = val_display[:max_val - 1] + "…"
+        print(f"│  {label}  {val_display}")
+    print(_c(bot, _GREY))
+
+
+def _divider(label: str = "") -> None:
+    w = _term_width()
+    if label:
+        pad = (w - len(label) - 2) // 2
+        print(_c("─" * pad + " " + label + " " + "─" * pad, _GREY))
+    else:
+        print(_c("─" * w, _GREY))
+
+
+def _step(n: int, total: int, msg: str) -> None:
+    """Prints a stage progress indicator: [2/4] Running triage..."""
+    counter = _c(f"[{n}/{total}]", _GREY)
+    print(f"  {counter}  {msg}")
+
+
+def _ok(msg: str) -> None:
+    print(_c("  ✓  ", _GREEN) + msg)
+
+
+def _err(msg: str) -> None:
+    print(_c("  ✗  ", _RED) + msg, file=sys.stderr)
+
+
+def _warn(msg: str) -> None:
+    print(_c("  ⚠  ", _YELLOW) + msg)
+
+
+def _hint(msg: str) -> None:
+    print(_c(f"  {msg}", _GREY))
+
+
+def _header(subtitle: str = "") -> None:
+    """Prints the tool banner."""
+    name = _c("scc-agent", _BOLD, _WHITE)
+    tag  = _c(f"  {subtitle}", _GREY) if subtitle else ""
+    print(f"\n  {name}{tag}\n")
+
+
+# ---------------------------------------------------------------------------
+# Table
+# ---------------------------------------------------------------------------
 
 def _print_table(rows: list[dict], columns: list[tuple[str, str]]) -> None:
-    """
-    Prints a simple aligned table.
-    columns: list of (header, dict_key) tuples.
-    """
+    """Prints an aligned table with coloured status/blast columns."""
     col_headers = [h for h, _ in columns]
     col_keys    = [k for _, k in columns]
 
@@ -88,27 +231,27 @@ def _print_table(rows: list[dict], columns: list[tuple[str, str]]) -> None:
         for i, key in enumerate(col_keys):
             widths[i] = max(widths[i], len(str(row.get(key, ""))))
 
-    sep   = "  "
-    fmt   = sep.join(f"{{:<{w}}}" for w in widths)
-    print(_c(fmt.format(*col_headers), _BOLD))
-    print(_c("-" * (sum(widths) + len(sep) * (len(widths) - 1)), _GREY))
+    sep = "  "
+    print("  " + _c(sep.join(h.ljust(widths[i]) for i, h in enumerate(col_headers)), _BOLD))
+    print("  " + _c(sep.join("─" * w for w in widths), _GREY))
 
     for row in rows:
-        vals = []
-        for key in col_keys:
-            val = str(row.get(key, ""))
-            if key == "status":
-                val = _status_color(val)
-            elif key in ("blast_level", "blast"):
-                val = _blast_color(val)
-            vals.append(val)
-        # Can't use fmt.format with colour codes (changes string length)
         parts = []
-        for i, v in enumerate(vals):
-            raw = str(rows[rows.index(row) if rows.index(row) >= 0 else 0].get(col_keys[i], ""))
+        for i, key in enumerate(col_keys):
+            raw = str(row.get(key, ""))
             pad = widths[i] - len(raw)
-            parts.append(v + " " * pad)
-        print(sep.join(parts))
+            if key == "status":
+                cell = _status_color(raw)
+            elif key in ("blast_level", "blast"):
+                cell = _blast_badge(raw) if raw else ""
+                pad  = widths[i] - len(raw)  # colour codes don't count
+            elif key == "severity":
+                cell = _severity_badge(raw) if raw else ""
+                pad  = widths[i] - len(raw)
+            else:
+                cell = raw
+            parts.append(cell + " " * pad)
+        print("  " + sep.join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +259,6 @@ def _print_table(rows: list[dict], columns: list[tuple[str, str]]) -> None:
 # ---------------------------------------------------------------------------
 
 def _http(method: str, url: str, payload: dict | None = None, token: str | None = None) -> dict:
-    """Minimal HTTP client using stdlib only."""
     data = json.dumps(payload).encode() if payload else None
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
@@ -132,15 +274,14 @@ def _http(method: str, url: str, payload: dict | None = None, token: str | None 
             detail = json.loads(body).get("detail", body)
         except Exception:
             detail = body
-        print(f"Error {e.code}: {detail}", file=sys.stderr)
+        _err(f"HTTP {e.code}: {detail}")
         sys.exit(1)
     except urllib.error.URLError as e:
-        print(f"Connection error: {e.reason}", file=sys.stderr)
+        _err(f"Connection error: {e.reason}")
         sys.exit(1)
 
 
 def _get_id_token(api_url: str) -> str | None:
-    """Fetches a GCP OIDC identity token for the target audience via the metadata server."""
     try:
         meta_url = (
             "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts"
@@ -163,26 +304,27 @@ def _firestore_client():
         from google.cloud import firestore
         return firestore.Client()
     except ImportError:
-        print("google-cloud-firestore is not installed.", file=sys.stderr)
+        _err("google-cloud-firestore is not installed.")
         sys.exit(1)
 
 
 def _get_approvals_local(customer_id: str, status_filter: str | None = None, limit: int = 20) -> list[dict]:
     db = _firestore_client()
-    query = (
+    q = (
         db.collection("approvals")
         .where("customer_id", "==", customer_id)
         .order_by("created_at", direction="DESCENDING")
         .limit(limit)
     )
     if status_filter:
-        query = db.collection("approvals") \
-            .where("customer_id", "==", customer_id) \
-            .where("status", "==", status_filter) \
-            .order_by("created_at", direction="DESCENDING") \
+        q = (
+            db.collection("approvals")
+            .where("customer_id", "==", customer_id)
+            .where("status", "==", status_filter)
+            .order_by("created_at", direction="DESCENDING")
             .limit(limit)
-
-    return [doc.to_dict() | {"approval_id": doc.id} for doc in query.stream()]
+        )
+    return [doc.to_dict() | {"approval_id": doc.id} for doc in q.stream()]
 
 
 def _get_findings_local(customer_id: str, limit: int = 10) -> list[dict]:
@@ -203,11 +345,11 @@ def _update_approval_local(approval_id: str, customer_id: str, action: str, acto
     ref = db.collection("approvals").document(approval_id)
     doc = ref.get()
     if not doc.exists:
-        print(f"Approval {approval_id} not found.", file=sys.stderr)
+        _err(f"Approval {approval_id} not found.")
         sys.exit(1)
     data = doc.to_dict()
     if data.get("status") != "PENDING":
-        print(f"Approval is already {data.get('status')} — cannot {action}.", file=sys.stderr)
+        _err(f"Approval is already {data.get('status')} — cannot {action}.")
         sys.exit(1)
 
     status_map = {"approve": "APPROVED", "reject": "REJECTED"}
@@ -218,7 +360,6 @@ def _update_approval_local(approval_id: str, customer_id: str, action: str, acto
     })
 
     if action == "approve":
-        # Enqueue execution via Cloud Tasks (same path as webhook)
         try:
             from scheduler.main import _enqueue_execution
             from config.schema import CustomerConfig
@@ -227,9 +368,9 @@ def _update_approval_local(approval_id: str, customer_id: str, action: str, acto
                 config = CustomerConfig(**config_doc.to_dict())
                 _enqueue_execution(approval_id, data.get("plan", {}), config)
         except Exception as e:
-            print(f"Warning: failed to enqueue execution: {e}", file=sys.stderr)
+            _warn(f"Failed to enqueue execution: {e}")
 
-    return {"status": status_map[action], "approval_id": approval_id}
+    return {"status": status_map[action], "approval_id": approval_id, "_data": data}
 
 
 def _rollback_local(approval_id: str) -> dict:
@@ -237,7 +378,7 @@ def _rollback_local(approval_id: str) -> dict:
         from app.tools.rollback_tools import execute_rollback
         return asyncio.run(execute_rollback(approval_id))
     except ImportError as e:
-        print(f"Import error: {e}", file=sys.stderr)
+        _err(f"Import error: {e}")
         sys.exit(1)
 
 
@@ -246,7 +387,7 @@ def _get_finding_local(finding_id: str, org_id: str) -> dict | None:
         from app.tools.scc_tools import get_finding_detail
         return get_finding_detail(finding_id, org_id)
     except ImportError as e:
-        print(f"Import error: {e}", file=sys.stderr)
+        _err(f"Import error: {e}")
         sys.exit(1)
 
 
@@ -255,203 +396,692 @@ def _get_finding_local(finding_id: str, org_id: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 def cmd_run(args):
-    """Runs the full remediation batch cycle for a customer."""
     customer_id = args.customer_id or os.environ.get("CUSTOMER_ID")
     if not customer_id:
-        print("Error: --customer-id is required (or set CUSTOMER_ID).", file=sys.stderr)
+        _err("--customer-id is required (or set CUSTOMER_ID).")
         sys.exit(1)
 
+    _header(f"run  ·  {customer_id}")
+
     if args.api_url:
-        token = _get_id_token(args.api_url)
-        result = _http("POST", f"{args.api_url}/internal/run-cycle",
-                       {"customer_id": customer_id}, token)
+        with _Spinner("Triggering remote run cycle..."):
+            token = _get_id_token(args.api_url)
+            result = _http("POST", f"{args.api_url}/internal/run-cycle",
+                           {"customer_id": customer_id}, token)
         print(json.dumps(result, indent=2))
         return
 
-    # Local: direct Python call
     try:
         from google.cloud import firestore
         from config.schema import CustomerConfig
         from app.main import run_remediation_cycle
     except ImportError as e:
-        print(f"Import error: {e}", file=sys.stderr)
+        _err(f"Import error: {e}")
         sys.exit(1)
 
+    _step(1, 4, "Loading customer config...")
     db = firestore.Client()
     doc = db.collection("customer_configs").document(customer_id).get()
     if not doc.exists:
-        print(f"No config found for customer_id={customer_id}.", file=sys.stderr)
+        _err(f"No config found for customer_id={customer_id}.")
+        sys.exit(1)
+    config = CustomerConfig(**doc.to_dict())
+
+    _step(2, 4, "Fetching active findings...")
+    _step(3, 4, "Running remediation pipeline...")
+    with _Spinner("Agent is working — this may take a few minutes"):
+        asyncio.run(run_remediation_cycle(config))
+
+    _step(4, 4, "Done.")
+    print()
+    _ok(f"Remediation cycle complete for {customer_id}")
+    _hint("Run  scc-agent status --customer-id " + customer_id + "  to see results.")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Models command
+# ---------------------------------------------------------------------------
+
+def cmd_models(args):
+    """Lists available Gemini models and optionally selects new defaults."""
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(__file__))
+    from scripts.discover_models import (
+        discover_models, print_model_table,
+        select_models_interactive, write_env_models,
+    )
+
+    _header("models")
+
+    print(_c("  Querying available Gemini models...", _GREY), end=" ", flush=True)
+    try:
+        models = discover_models()
+        print(_c("done", _GREEN))
+    except Exception as exc:
+        print(_c(f"failed", _RED))
+        _err(str(exc))
         sys.exit(1)
 
-    config = CustomerConfig(**doc.to_dict())
-    print(f"Starting remediation cycle for {customer_id}...")
-    asyncio.run(run_remediation_cycle(config))
+    current_flash = os.environ.get("MODEL_ID", "")
+    current_pro   = os.environ.get("PLANNING_MODEL_ID", "")
+    print_model_table(models, current_flash, current_pro)
+
+    # Show current config
+    print(f"  {'Current flash':16}  {_c(current_flash or '(not set)', _YELLOW if not current_flash else _CYAN)}")
+    print(f"  {'Current pro':16}  {_c(current_pro   or '(not set)', _YELLOW if not current_pro   else _CYAN)}")
+    print()
+
+    if getattr(args, "select", False):
+        selected = select_models_interactive(models)
+        flash = selected.get("flash", models["flash"][0] if models["flash"] else "")
+        pro   = selected.get("pro",   models["pro"][0]   if models["pro"] else "")
+
+        if not flash and not pro:
+            _err("No models selected.")
+            sys.exit(1)
+
+        env_path = os.path.join(os.path.dirname(__file__) or ".", ".env")
+        write_env_models(flash, pro, env_path)
+        print()
+        _ok(f"Written to {env_path}")
+        print(f"  {'MODEL_ID':20}  {flash}")
+        print(f"  {'PLANNING_MODEL_ID':20}  {pro}")
+        print()
+        _hint("Run  source .env  or re-run local_test.sh to apply.")
+        print()
+    else:
+        flash_latest = models["flash"][0] if models["flash"] else ""
+        pro_latest   = models["pro"][0]   if models["pro"] else ""
+        _hint("Run  scc-agent models --select  to pick and save new defaults.")
+        if flash_latest and flash_latest != current_flash:
+            _hint(f"Newer flash listed: {flash_latest}  (run --select to test access)")
+        if pro_latest and pro_latest != current_pro:
+            _hint(f"Newer pro listed: {pro_latest}  (run --select to test access)")
+        print()
+
+
+# ---------------------------------------------------------------------------
+# Interactive chat REPL (replaces `adk run app`)
+# ---------------------------------------------------------------------------
+
+_SLASH_HELP = """\
+  /help           show this message
+  /status         show pending approvals (uses --customer-id from session)
+  /finding <id>   show details for a finding ID
+  /clear          clear the screen
+  /exit           end the session (also Ctrl+C)
+"""
+
+
+def _print_session_summary(
+    turns: int,
+    total_tokens: int,
+    prompt_tokens: int,
+    output_tokens: int,
+    start_time: float,
+    model_id: str,
+) -> None:
+    elapsed = int(time.time() - start_time)
+    dur = f"{elapsed // 60}m{elapsed % 60:02d}s" if elapsed >= 60 else f"{elapsed}s"
+    print()
+    print(_c("  Session summary", _BOLD))
+    _divider()
+    rows = [
+        ("Model",    model_id),
+        ("Turns",    str(turns)),
+        ("Tokens",   f"{total_tokens:,}  (in: {prompt_tokens:,}  out: {output_tokens:,})"),
+        ("Duration", dur),
+    ]
+    key_w = max(len(k) for k, _ in rows)
+    for k, v in rows:
+        print(f"  {_c(k.ljust(key_w), _DIM)}  {v}")
+    print()
+
+
+def _stats_line(turn: int, total_tokens: int, elapsed_secs: int, model_id: str) -> str:
+    dur = f"{elapsed_secs // 60}m{elapsed_secs % 60:02d}s" if elapsed_secs >= 60 else f"{elapsed_secs}s"
+    return _c(
+        f"  {model_id}  ·  turn {turn}  ·  {total_tokens:,} tok  ·  {dur}",
+        _GREY,
+    )
+
+
+async def _run_agent_turn(
+    runner,
+    session,
+    user_text: str,
+    spinner_msg: str = "Thinking...",
+) -> tuple[str, int, int]:
+    """
+    Sends `user_text` to the agent and collects the final response.
+    Returns (response_text, prompt_token_count, output_token_count).
+    """
+    from google.genai import types as genai_types
+
+    content = genai_types.Content(
+        role="user",
+        parts=[genai_types.Part(text=user_text)],
+    )
+
+    response_parts: list[str] = []
+    prompt_tok = 0
+    output_tok = 0
+    # Human-readable labels for each tool call shown in the spinner
+    _TOOL_LABELS: dict[str, str] = {
+        "list_active_findings":    "Fetching active findings from SCC...",
+        "get_finding_detail":      "Looking up finding details...",
+        "mute_resolved_finding":   "Muting resolved finding...",
+        "query_blast_radius":      "Analysing blast radius...",
+        "query_iam_paths":         "Checking IAM privilege paths...",
+        "check_dormancy":          "Checking asset activity...",
+        "query_dependency_chain":  "Mapping resource dependencies...",
+        "get_network_exposure":    "Assessing network exposure...",
+        "dispatch_approval_request": "Sending approval request...",
+        "create_patch_job":        "Scheduling patch job...",
+    }
+
+    tool_names_seen: set[str] = set()
+
+    with _Spinner(spinner_msg) as sp:
+        async for event in runner.run_async(
+            user_id="cli",
+            session_id=session.id,
+            new_message=content,
+        ):
+            # Update spinner with a human-readable label for the tool being called
+            for fc in (event.get_function_calls() or []):
+                if fc.name not in tool_names_seen:
+                    tool_names_seen.add(fc.name)
+                    label = _TOOL_LABELS.get(fc.name, f"Running {fc.name}...")
+                    sp.update(label)
+
+            # Collect final text
+            if event.is_final_response() and event.content:
+                for part in event.content.parts:
+                    if part.text:
+                        response_parts.append(part.text)
+
+            # Collect token usage (last event wins)
+            if event.usage_metadata:
+                prompt_tok  = event.usage_metadata.prompt_token_count      or 0
+                output_tok  = event.usage_metadata.candidates_token_count  or 0
+
+    return "".join(response_parts).strip(), prompt_tok, output_tok
+
+
+_URL_RE = re.compile(r"https?://[^\s\)\]\"'>]+")
+
+
+def _linkify(text: str) -> str:
+    """Wrap URLs in OSC 8 terminal hyperlinks (supported by iTerm2, VSCode, etc.)."""
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+
+    def _replace(m: re.Match) -> str:
+        url = m.group(0).rstrip(".,;:")  # strip trailing punctuation
+        return f"\033]8;;{url}\033\\{url}\033]8;;\033\\"
+
+    return _URL_RE.sub(_replace, text)
+
+
+def _print_agent_response(text: str) -> None:
+    if not text:
+        return
+    tw = max(_term_width() - 6, 40)
+    print()
+    print(_c("  Agent  ›", _GREY))
+    print()
+    seen: set[str] = set()
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped:
+            # Deduplicate repeated lines (model sometimes echoes menu twice)
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+            # Never wrap lines that contain a URL — wrapping breaks clickable links
+            if _URL_RE.search(line):
+                print("    " + _linkify(line))
+                continue
+            # Linkify before wrapping in case of inline URLs
+            line = _linkify(line)
+            # Preserve indented lines (code blocks, lists) without re-wrapping
+            indent = len(line) - len(line.lstrip())
+            if indent > 0 or len(line) <= tw:
+                print("    " + line)
+            else:
+                for wrapped in textwrap.wrap(line, width=tw, subsequent_indent="    "):
+                    print("    " + wrapped)
+        else:
+            print()
+
+
+async def _chat_loop(org_id: str, customer_id: str) -> None:
+    from google.adk.runners import InMemoryRunner
+
+    # Load the agent (triggers app/__init__.py env setup)
+    import app  # noqa: F401
+    from app.agent import root_agent
+
+    model_id = os.environ.get("MODEL_ID", "gemini-2.0-flash-preview")
+
+    runner = InMemoryRunner(agent=root_agent, app_name="scc-agent")
+    session = await runner.session_service.create_session(
+        app_name="scc-agent",
+        user_id="cli",
+        state={"org_id": org_id, "customer_id": customer_id},
+    )
+
+    total_tokens  = 0
+    prompt_tokens = 0
+    output_tokens = 0
+    turn          = 0
+    start_time    = time.time()
+
+    # ── Header ──────────────────────────────────────────────────────────
+    print()
+    print(f"  {_c('scc-agent', _BOLD, _WHITE)}  {_c('chat', _CYAN)}")
+    print()
+    kw = 10
+    for k, v in [("org", org_id), ("customer", customer_id or "—"), ("model", model_id)]:
+        print(f"  {_c(k.ljust(kw), _GREY)}  {v}")
+    print()
+    print(_c("  Type a message or instruction. /help for commands. Ctrl+C to exit.", _GREY))
+    _divider()
+
+    # ── Initial proactive turn ───────────────────────────────────────────
+    # Seed the agent with context and ask it to proactively fetch findings.
+    seed = (
+        f"org_id={org_id}"
+        + (f", customer_id={customer_id}" if customer_id else "")
+        + ". List the top priority active findings now."
+    )
+    turn += 1
+    resp, p_tok, o_tok = await _run_agent_turn(
+        runner, session, seed, "Fetching top priority findings..."
+    )
+    _print_agent_response(resp)
+    prompt_tokens += p_tok
+    output_tokens += o_tok
+    total_tokens  += p_tok + o_tok
+    elapsed = int(time.time() - start_time)
+    print()
+    print(_stats_line(turn, total_tokens, elapsed, model_id))
+
+    # ── REPL ────────────────────────────────────────────────────────────
+    while True:
+        try:
+            print()
+            user_input = input(_c("  You  › ", _BOLD, _CYAN)).strip()
+        except (KeyboardInterrupt, EOFError):
+            print()
+            _divider()
+            _print_session_summary(turn, total_tokens, prompt_tokens, output_tokens, start_time, model_id)
+            return
+
+        if not user_input:
+            continue
+
+        # Slash commands
+        if user_input.startswith("/"):
+            cmd = user_input.lstrip("/").split()[0].lower()
+            rest = user_input[len(cmd) + 2:].strip()
+            if cmd in ("exit", "quit"):
+                _divider()
+                _print_session_summary(turn, total_tokens, prompt_tokens, output_tokens, start_time, model_id)
+                return
+            if cmd == "help":
+                print(_SLASH_HELP)
+                continue
+            if cmd == "clear":
+                print("\033[2J\033[H", end="")
+                continue
+            if cmd == "status" and customer_id:
+                approvals = _get_approvals_local(customer_id, "PENDING", limit=10)
+                if approvals:
+                    rows = [
+                        {
+                            "id":       (a.get("approval_id", "")[:12] + "…"),
+                            "severity": a.get("severity", ""),
+                            "blast":    a.get("blast_level", ""),
+                            "asset":    (a.get("asset_name", "") or "").split("/")[-1][:28],
+                            "age":      _relative_time(a.get("created_at")),
+                        }
+                        for a in approvals
+                    ]
+                    print()
+                    _print_table(rows, [
+                        ("ID", "id"), ("SEVERITY", "severity"),
+                        ("BLAST", "blast"), ("ASSET", "asset"), ("AGE", "age"),
+                    ])
+                else:
+                    print("  No pending approvals.")
+                continue
+            if cmd == "finding" and rest:
+                org = org_id or os.environ.get("ORG_ID", "")
+                finding = _get_finding_local(rest, org)
+                if finding:
+                    print()
+                    _panel("Finding", [
+                        ("ID",       rest),
+                        ("Resource", finding.get("resource_name", "—")),
+                        ("Category", finding.get("category", "—")),
+                        ("Severity", _severity_badge(finding.get("severity", "—"))),
+                        ("State",    _status_color(finding.get("state", "—"))),
+                    ])
+                continue
+            _hint(f"Unknown command /{cmd}. Type /help.")
+            continue
+
+        # Agent turn
+        turn += 1
+        try:
+            resp, p_tok, o_tok = await _run_agent_turn(runner, session, user_input)
+        except KeyboardInterrupt:
+            print()
+            _divider()
+            _print_session_summary(turn - 1, total_tokens, prompt_tokens, output_tokens, start_time, model_id)
+            return
+        _print_agent_response(resp)
+        prompt_tokens += p_tok
+        output_tokens += o_tok
+        total_tokens  += p_tok + o_tok
+        elapsed = int(time.time() - start_time)
+        print()
+        print(_stats_line(turn, total_tokens, elapsed, model_id))
 
 
 def cmd_chat(args):
-    """Starts an interactive ADK terminal session."""
     if args.api_url:
-        print("chat command is local-only (launches the ADK CLI).", file=sys.stderr)
+        _err("chat is local-only.")
         sys.exit(1)
-    import subprocess
-    # adk run app launches root_agent in interactive terminal mode
-    result = subprocess.run(["adk", "run", "app"], cwd=os.path.dirname(__file__))
-    sys.exit(result.returncode)
+
+    org_id      = args.org_id      or os.environ.get("ORG_ID", "")
+    customer_id = args.customer_id or os.environ.get("CUSTOMER_ID", "")
+    if not org_id:
+        _err("--org-id is required for chat (or set ORG_ID).")
+        sys.exit(1)
+
+    asyncio.run(_chat_loop(org_id, customer_id))
 
 
 def cmd_status(args):
-    """Shows pending approvals and recent findings."""
     customer_id = args.customer_id or os.environ.get("CUSTOMER_ID")
     if not customer_id:
-        print("Error: --customer-id is required.", file=sys.stderr)
+        _err("--customer-id is required.")
         sys.exit(1)
 
-    status_filter = args.filter  # e.g. PENDING, APPROVED, etc.
+    status_filter = getattr(args, "filter", None)
 
-    if args.api_url:
-        token = _get_id_token(args.api_url)
-        params = f"?status={status_filter}" if status_filter else ""
-        approvals = _http("GET", f"{args.api_url}/api/approvals/{customer_id}{params}", token=token)
-    else:
-        approvals = _get_approvals_local(customer_id, status_filter)
-
-    if not approvals:
-        print("No approvals found.")
-        return
+    with _Spinner("Fetching approvals..."):
+        if args.api_url:
+            token = _get_id_token(args.api_url)
+            params = f"?status={status_filter}" if status_filter else ""
+            approvals = _http("GET", f"{args.api_url}/api/approvals/{customer_id}{params}", token=token)
+        else:
+            approvals = _get_approvals_local(customer_id, status_filter, getattr(args, "limit", 20))
 
     if args.format == "json":
         print(json.dumps(approvals, indent=2, default=str))
         return
 
+    _header(f"status  ·  {customer_id}")
+
+    if not approvals:
+        label = f" ({status_filter})" if status_filter else ""
+        print(f"  No approvals found{label}.")
+        _hint("Run  scc-agent run --customer-id " + customer_id + "  to start a cycle.")
+        print()
+        return
+
+    # Summary counts
+    counts: dict[str, int] = {}
+    for a in approvals:
+        s = a.get("status", "UNKNOWN")
+        counts[s] = counts.get(s, 0) + 1
+
+    summary_parts = []
+    for s, n in sorted(counts.items()):
+        summary_parts.append(_status_color(s) + _c(f" {n}", _BOLD))
+    print("  " + "   ".join(summary_parts))
+    print()
+
     rows = [
         {
-            "approval_id": a.get("approval_id", "")[:12] + "…",
-            "finding_id":  a.get("finding_id", "")[:12] + "…",
-            "status":      a.get("status", ""),
-            "blast":       a.get("blast_level", ""),
-            "tier":        str(a.get("tier", "")),
-            "asset":       (a.get("asset_name", "") or "").split("/")[-1][:30],
-            "created":     str(a.get("created_at", ""))[:16],
+            "id":       (a.get("approval_id", "")[:12] + "…"),
+            "severity": a.get("severity", ""),
+            "status":   a.get("status", ""),
+            "blast":    a.get("blast_level", ""),
+            "tier":     f"T{a.get('execution_tier', a.get('tier', '?'))}",
+            "asset":    (a.get("asset_name", "") or "").split("/")[-1][:28],
+            "age":      _relative_time(a.get("created_at")),
         }
         for a in approvals
     ]
     _print_table(rows, [
-        ("APPROVAL ID",  "approval_id"),
-        ("FINDING ID",   "finding_id"),
-        ("STATUS",       "status"),
-        ("BLAST",        "blast"),
-        ("TIER",         "tier"),
-        ("ASSET",        "asset"),
-        ("CREATED",      "created"),
+        ("ID",       "id"),
+        ("SEVERITY", "severity"),
+        ("STATUS",   "status"),
+        ("BLAST",    "blast"),
+        ("TIER",     "tier"),
+        ("ASSET",    "asset"),
+        ("AGE",      "age"),
     ])
-    print(f"\n{len(approvals)} approval(s) shown.")
+    print()
+    _hint(f"{len(approvals)} approval(s) shown" + (f"  ·  filter: {status_filter}" if status_filter else ""))
+    _hint("scc-agent approve <id>  ·  scc-agent reject <id>  ·  scc-agent finding <id>")
+    print()
 
 
 def cmd_approve(args):
-    """Approves a pending remediation request."""
     approval_id = args.approval_id
     customer_id = args.customer_id or os.environ.get("CUSTOMER_ID", "")
-    actor = args.actor or os.environ.get("USER", "cli-user")
+    actor       = args.actor or os.environ.get("USER", "cli-user")
 
     if args.api_url:
+        # Remote: fetch details for preview first
         token = _get_id_token(args.api_url)
+        try:
+            detail = _http("GET", f"{args.api_url}/api/approvals/{approval_id}", token=token)
+            _print_approval_preview(detail)
+        except SystemExit:
+            pass  # detail fetch failed, proceed without preview
+        if not args.yes and not _confirm(f"Approve this remediation as {actor}?"):
+            print("  Aborted.")
+            return
         result = _http("POST", f"{args.api_url}/api/approvals/{approval_id}/approve",
                        {"actor": actor}, token)
     else:
+        # Local: fetch record before updating so we can show preview
+        db = _firestore_client()
+        doc = db.collection("approvals").document(approval_id).get()
+        if doc.exists:
+            _print_approval_preview(doc.to_dict() | {"approval_id": approval_id})
+        if not args.yes and not _confirm(f"Approve this remediation as {actor}?"):
+            print("  Aborted.")
+            return
         result = _update_approval_local(approval_id, customer_id, "approve", actor)
 
     if args.format == "json":
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps({k: v for k, v in result.items() if k != "_data"}, indent=2, default=str))
     else:
-        print(_c(f"✓ Approved {approval_id}", _GREEN))
-        print(f"  Status : {result.get('status')}")
-        print(f"  Actor  : {actor}")
+        print()
+        _ok(f"Approved  {approval_id}")
+        _hint(f"Responded by: {actor}")
+        print()
 
 
 def cmd_reject(args):
-    """Rejects a pending remediation request."""
     approval_id = args.approval_id
     customer_id = args.customer_id or os.environ.get("CUSTOMER_ID", "")
-    actor = args.actor or os.environ.get("USER", "cli-user")
+    actor       = args.actor or os.environ.get("USER", "cli-user")
 
     if args.api_url:
         token = _get_id_token(args.api_url)
+        try:
+            detail = _http("GET", f"{args.api_url}/api/approvals/{approval_id}", token=token)
+            _print_approval_preview(detail)
+        except SystemExit:
+            pass
+        if not args.yes and not _confirm(f"Reject this remediation as {actor}?"):
+            print("  Aborted.")
+            return
         result = _http("POST", f"{args.api_url}/api/approvals/{approval_id}/reject",
                        {"actor": actor}, token)
     else:
+        db = _firestore_client()
+        doc = db.collection("approvals").document(approval_id).get()
+        if doc.exists:
+            _print_approval_preview(doc.to_dict() | {"approval_id": approval_id})
+        if not args.yes and not _confirm(f"Reject this remediation as {actor}?"):
+            print("  Aborted.")
+            return
         result = _update_approval_local(approval_id, customer_id, "reject", actor)
 
     if args.format == "json":
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps({k: v for k, v in result.items() if k != "_data"}, indent=2, default=str))
     else:
-        print(_c(f"✗ Rejected {approval_id}", _RED))
-        print(f"  Status : {result.get('status')}")
-        print(f"  Actor  : {actor}")
+        print()
+        _err(f"Rejected  {approval_id}")
+        _hint(f"Responded by: {actor}")
+        print()
 
 
 def cmd_rollback(args):
-    """Rolls back an executed remediation (within 24 h of execution)."""
     approval_id = args.approval_id
 
+    # Fetch details for preview before confirming
+    if not args.api_url:
+        db = _firestore_client()
+        doc = db.collection("approvals").document(approval_id).get()
+        if doc.exists:
+            _print_approval_preview(doc.to_dict() | {"approval_id": approval_id})
+
     if not args.yes:
-        confirm = input(f"Roll back remediation {approval_id}? This will undo the changes. [y/N] ")
-        if confirm.strip().lower() not in ("y", "yes"):
-            print("Aborted.")
+        _warn("This will undo all changes made by the remediation.")
+        if not _confirm(f"Roll back {approval_id}?"):
+            print("  Aborted.")
             return
 
-    if args.api_url:
-        token = _get_id_token(args.api_url)
-        result = _http("POST", f"{args.api_url}/api/rollback/{approval_id}", token=token)
-    else:
-        result = _rollback_local(approval_id)
+    with _Spinner("Executing rollback..."):
+        if args.api_url:
+            token = _get_id_token(args.api_url)
+            result = _http("POST", f"{args.api_url}/api/rollback/{approval_id}", token=token)
+        else:
+            result = _rollback_local(approval_id)
 
     if args.format == "json":
         print(json.dumps(result, indent=2, default=str))
+        return
+
+    status = result.get("status", "")
+    print()
+    if status == "SUCCESS":
+        _ok(f"Rollback succeeded  ·  {approval_id}")
     else:
-        status = result.get("status", "")
-        if status == "SUCCESS":
-            print(_c(f"✓ Rollback succeeded for {approval_id}", _GREEN))
-        else:
-            print(_c(f"✗ Rollback failed: {result.get('output', '')}", _RED))
-        if result.get("steps_reversed"):
-            print(f"  Steps reversed: {result['steps_reversed']}")
+        _err(f"Rollback failed: {result.get('output', 'unknown error')}")
+
+    if result.get("steps_reversed"):
+        _hint(f"Steps reversed: {result['steps_reversed']}")
+    print()
 
 
 def cmd_finding(args):
-    """Shows details of a specific SCC finding."""
     finding_id = args.finding_id
-    org_id = args.org_id or os.environ.get("ORG_ID", "")
+    org_id     = args.org_id or os.environ.get("ORG_ID", "")
 
-    if args.api_url:
-        token = _get_id_token(args.api_url)
-        finding = _http("GET", f"{args.api_url}/api/findings/{finding_id}", token=token)
-    else:
-        if not org_id:
-            print("Error: --org-id is required for local finding lookup (or set ORG_ID).", file=sys.stderr)
-            sys.exit(1)
-        finding = _get_finding_local(finding_id, org_id)
-        if not finding:
-            print(f"Finding {finding_id} not found.", file=sys.stderr)
-            sys.exit(1)
+    with _Spinner(f"Fetching {finding_id}..."):
+        if args.api_url:
+            token   = _get_id_token(args.api_url)
+            finding = _http("GET", f"{args.api_url}/api/findings/{finding_id}", token=token)
+        else:
+            if not org_id:
+                _err("--org-id is required for local finding lookup (or set ORG_ID).")
+                sys.exit(1)
+            finding = _get_finding_local(finding_id, org_id)
+            if not finding:
+                _err(f"Finding {finding_id} not found.")
+                sys.exit(1)
 
     if args.format == "json":
         print(json.dumps(finding, indent=2, default=str))
         return
 
-    print(_c(f"Finding: {finding_id}", _BOLD))
-    print(f"  Resource : {finding.get('resource_name', '')}")
-    print(f"  Category : {finding.get('category', '')}")
-    severity = finding.get("severity", "")
-    print(f"  Severity : {_blast_color(severity)}")
-    state = finding.get("state", finding.get("status", ""))
-    print(f"  State    : {_status_color(state)}")
+    print()
+
+    rows: list[tuple[str, str]] = [
+        ("Finding",  finding_id),
+        ("Resource", finding.get("resource_name", "—")),
+        ("Category", finding.get("category", "—")),
+        ("Severity", _severity_badge(finding.get("severity", "—"))),
+        ("State",    _status_color(finding.get("state", finding.get("status", "—")))),
+    ]
     if finding.get("cve_ids"):
-        print(f"  CVEs     : {', '.join(finding['cve_ids'])}")
+        rows.append(("CVEs", ", ".join(finding["cve_ids"])))
     if finding.get("attack_exposure_score") is not None:
-        print(f"  Attack exposure score: {finding['attack_exposure_score']}")
+        rows.append(("Attack exposure", str(finding["attack_exposure_score"])))
     if finding.get("remediation_text"):
-        guidance = textwrap.shorten(finding["remediation_text"], width=80, placeholder="…")
-        print(f"  Guidance : {guidance}")
+        guidance = textwrap.shorten(finding["remediation_text"], width=60, placeholder="…")
+        rows.append(("Guidance", guidance))
+
+    _panel("Finding details", rows)
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Shared UI helpers
+# ---------------------------------------------------------------------------
+
+def _print_approval_preview(a: dict) -> None:
+    """Renders a panel summarising an approval before a confirmation prompt."""
+    print()
+    rows: list[tuple[str, str]] = [
+        ("Approval",  (a.get("approval_id", ""))[:16] + "…"),
+        ("Asset",     (a.get("asset_name", "—") or "—").split("/")[-1]),
+        ("Severity",  _severity_badge(a.get("severity", "—"))),
+        ("Blast",     _blast_badge(a.get("blast_level", "—"))),
+        ("Tier",      f"T{a.get('execution_tier', a.get('tier', '?'))}"),
+        ("Status",    _status_color(a.get("status", "—"))),
+    ]
+    if a.get("plan_summary") or (a.get("plan") and a["plan"].get("summary")):
+        summary = a.get("plan_summary") or a["plan"]["summary"]
+        rows.append(("Plan", textwrap.shorten(summary, width=56, placeholder="…")))
+    if a.get("confidence_score") is not None:
+        rows.append(("Confidence", f"{a['confidence_score']:.0%}"))
+    _panel("Approval", rows)
+
+
+def _confirm(prompt: str) -> bool:
+    """Prints a prompt and returns True if user answers y/yes."""
+    try:
+        answer = input(_c(f"\n  {prompt} ", _BOLD) + _c("[y/N]  ", _GREY))
+        return answer.strip().lower() in ("y", "yes")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+
+
+def _relative_time(ts) -> str:
+    """Returns a human-readable relative timestamp like '2h ago'."""
+    if ts is None:
+        return "—"
+    try:
+        if hasattr(ts, "timestamp"):
+            dt = ts
+        else:
+            dt = datetime.datetime.fromisoformat(str(ts))
+        delta = datetime.datetime.utcnow() - dt.replace(tzinfo=None)
+        secs = int(delta.total_seconds())
+        if secs < 60:
+            return f"{secs}s ago"
+        if secs < 3600:
+            return f"{secs // 60}m ago"
+        if secs < 86400:
+            return f"{secs // 3600}h ago"
+        return f"{secs // 86400}d ago"
+    except Exception:
+        return str(ts)[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -468,92 +1098,85 @@ def _build_parser() -> argparse.ArgumentParser:
             Remote mode (--api-url): routes calls to a deployed scheduler Cloud Run service.
 
             Examples:
-              # Interactive terminal session (ADK chat)
               scc-agent chat
-
-              # Run the batch remediation cycle
               scc-agent run --customer-id acme-prod
-
-              # Show pending approvals
               scc-agent status --customer-id acme-prod --filter PENDING
-
-              # Approve a pending remediation
               scc-agent approve apv-abc123 --customer-id acme-prod
-
-              # Reject a pending remediation
-              scc-agent reject apv-abc123 --customer-id acme-prod
-
-              # Roll back an executed remediation
+              scc-agent reject  apv-abc123 --customer-id acme-prod
               scc-agent rollback apv-abc123
-
-              # Show finding details
-              scc-agent finding find-001 --org-id 123456789
-
-              # All of the above against a remote deployment
+              scc-agent finding  find-001 --org-id 123456789
               scc-agent status --api-url https://scheduler-abc.run.app --customer-id acme-prod
         """),
     )
 
-    # Global options
+    # Global options on the main parser (apply when placed BEFORE the subcommand).
+    # They are also added to every subparser below so they work in either position:
+    #   scc-agent --org-id X chat          ← before subcommand
+    #   scc-agent chat --org-id X          ← after subcommand (also works)
+    _G = dict(default=argparse.SUPPRESS)   # don't override the parent default
     parser.add_argument("--customer-id", help="Customer ID (env: CUSTOMER_ID)")
-    parser.add_argument("--org-id", help="GCP org ID for finding lookups (env: ORG_ID)")
-    parser.add_argument(
-        "--api-url",
-        help="Deployed scheduler service base URL — enables remote mode",
-    )
-    parser.add_argument(
-        "--format",
-        choices=["table", "json"],
-        default="table",
-        help="Output format (default: table)",
-    )
+    parser.add_argument("--org-id",      help="GCP org ID (env: ORG_ID)")
+    parser.add_argument("--api-url",     help="Deployed scheduler base URL — enables remote mode")
+    parser.add_argument("--format",      choices=["table", "json"], default="table",
+                        help="Output format (default: table)")
 
     sub = parser.add_subparsers(dest="command", metavar="command")
     sub.required = True
 
-    # run
-    sub.add_parser("run", help="Run the full remediation batch cycle")
+    def _add_globals(p):
+        """Attach global options to a subparser so they work after the subcommand."""
+        p.add_argument("--customer-id", **_G)
+        p.add_argument("--org-id",      **_G)
+        p.add_argument("--api-url",     **_G)
+        p.add_argument("--format",      choices=["table", "json"], **_G)
 
-    # chat
-    sub.add_parser("chat", help="Start interactive ADK terminal session (local only)")
+    run_p  = sub.add_parser("run",  help="Run the full remediation batch cycle")
+    _add_globals(run_p)
 
-    # status
+    models_p = sub.add_parser("models", help="List available Gemini models and optionally select new defaults")
+    _add_globals(models_p)
+    models_p.add_argument("--select", action="store_true", help="Interactively pick models and save to .env")
+
+    chat_p = sub.add_parser("chat", help="Start interactive CLI session (local only)")
+    _add_globals(chat_p)
+
     status_p = sub.add_parser("status", help="Show approvals and recent activity")
-    status_p.add_argument(
-        "--filter",
-        metavar="STATUS",
-        help="Filter by status: PENDING, APPROVED, REJECTED, BLOCKED, DEFERRED",
-    )
-    status_p.add_argument("--limit", type=int, default=20, help="Max rows to show (default: 20)")
+    _add_globals(status_p)
+    status_p.add_argument("--filter", metavar="STATUS",
+                          help="Filter by status: PENDING, APPROVED, REJECTED, BLOCKED, DEFERRED")
+    status_p.add_argument("--limit", type=int, default=20, help="Max rows (default: 20)")
 
-    # approve
     approve_p = sub.add_parser("approve", help="Approve a pending remediation")
-    approve_p.add_argument("approval_id", help="Approval ID to approve")
+    _add_globals(approve_p)
+    approve_p.add_argument("approval_id")
     approve_p.add_argument("--actor", help="Approver identity (default: $USER)")
+    approve_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
 
-    # reject
     reject_p = sub.add_parser("reject", help="Reject a pending remediation")
-    reject_p.add_argument("approval_id", help="Approval ID to reject")
+    _add_globals(reject_p)
+    reject_p.add_argument("approval_id")
     reject_p.add_argument("--actor", help="Rejecter identity (default: $USER)")
+    reject_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
 
-    # rollback
     rollback_p = sub.add_parser("rollback", help="Roll back an executed remediation (24 h window)")
-    rollback_p.add_argument("approval_id", help="Approval ID to roll back")
+    _add_globals(rollback_p)
+    rollback_p.add_argument("approval_id")
     rollback_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
 
-    # finding
     finding_p = sub.add_parser("finding", help="Show SCC finding details")
-    finding_p.add_argument("finding_id", help="Finding ID")
+    _add_globals(finding_p)
+    finding_p.add_argument("finding_id")
 
     return parser
 
 
 def main():
     parser = _build_parser()
-    args = parser.parse_args()
+    args   = parser.parse_args()
 
     dispatch = {
         "run":      cmd_run,
+        "models":   cmd_models,
         "chat":     cmd_chat,
         "status":   cmd_status,
         "approve":  cmd_approve,
