@@ -108,11 +108,14 @@ No customer data leaves your GCP organisation.
 To test against a real GCP org from your laptop without deploying anything, see **[LOCAL_TESTING.md](LOCAL_TESTING.md)**.
 
 ```bash
-# Interactive chat (no local infra needed)
+# Interactive chat — AI Studio key (free, no GCP project needed)
+./scripts/local_test.sh --org-id YOUR_ORG_ID --api-key YOUR_AI_STUDIO_KEY --mode A
+
+# Interactive chat — Vertex AI
 ./scripts/local_test.sh --org-id YOUR_ORG_ID --project YOUR_PROJECT --mode A
 
 # Full dry-run batch pipeline (Docker required)
-./scripts/local_test.sh --org-id YOUR_ORG_ID --project YOUR_PROJECT --mode B
+./scripts/local_test.sh --org-id YOUR_ORG_ID --api-key YOUR_AI_STUDIO_KEY --mode B
 ```
 
 ---

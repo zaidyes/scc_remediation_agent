@@ -15,9 +15,25 @@ Two modes — pick based on how much you want to test:
 
 ## Prerequisites
 
-### 1. GCP permissions
+### 1. LLM access — AI Studio (recommended) or Vertex AI
 
-Your ADC account needs these roles. Grant them at the **org level** (or folder/project level if you want to narrow scope):
+The only reason a GCP project ID is required is for the Gemini API. Everything else (SCC reads, CAI traversal, IAM analysis) is org-scoped — no project needed.
+
+**Option A — AI Studio API key (easiest, free, no GCP project needed):**
+```bash
+# Get a free key at https://aistudio.google.com/apikey
+# Pass it to the script as --api-key YOUR_KEY
+```
+
+**Option B — Vertex AI (requires a GCP project with billing):**
+```bash
+gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT
+# Pass --project YOUR_PROJECT to the script
+```
+
+### 2. GCP permissions (org-level read — no project roles needed for the data)
+
+Grant these at the **org level** on your user account:
 
 | Role | Why |
 |------|-----|
@@ -25,11 +41,8 @@ Your ADC account needs these roles. Grant them at the **org level** (or folder/p
 | `roles/cloudasset.viewer` | Read Cloud Asset Inventory (assets, IAM) |
 | `roles/iam.securityReviewer` | `analyzeIamPolicy` calls |
 | `roles/compute.viewer` | Instance and network metadata |
-| `roles/datastore.user` | Read/write Firestore (on your test project) |
-| `roles/aiplatform.user` | Vertex AI / Gemini API calls (on your test project) |
 
 ```bash
-# Grant org-level read roles (requires org admin)
 ORG_ID=123456789012
 USER=$(gcloud config get-value account)
 
@@ -44,12 +57,11 @@ gcloud organizations add-iam-policy-binding $ORG_ID \
 
 gcloud organizations add-iam-policy-binding $ORG_ID \
   --member="user:$USER" --role="roles/compute.viewer"
+```
 
-# Project-level roles (on your test/billing project)
-PROJECT=your-test-project
-gcloud projects add-iam-policy-binding $PROJECT \
-  --member="user:$USER" --role="roles/datastore.user"
-gcloud projects add-iam-policy-binding $PROJECT \
+If you're using Vertex AI (not AI Studio), also grant on the project:
+```bash
+gcloud projects add-iam-policy-binding YOUR_PROJECT \
   --member="user:$USER" --role="roles/aiplatform.user"
 ```
 
@@ -72,6 +84,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ## Mode A — Interactive chat (no local infra)
 
 ```bash
+# With AI Studio key (no GCP project needed)
+./scripts/local_test.sh \
+  --org-id YOUR_ORG_ID \
+  --api-key YOUR_AI_STUDIO_KEY \
+  --mode A
+
+# Or with Vertex AI
 ./scripts/local_test.sh \
   --org-id YOUR_ORG_ID \
   --project YOUR_GCP_PROJECT \
@@ -93,12 +112,19 @@ The agent will query your real SCC and CAI APIs. Graph-based blast radius querie
 ## Mode B — Full dry-run batch pipeline
 
 ```bash
+# With AI Studio key
 ./scripts/local_test.sh \
   --org-id YOUR_ORG_ID \
-  --project YOUR_GCP_PROJECT \
+  --api-key YOUR_AI_STUDIO_KEY \
   --mode B \
   --project-ids proj-1,proj-2   # optional: narrow to specific projects
   --severity HIGH_PLUS           # optional: CRITICAL_ONLY | HIGH_PLUS | MEDIUM_PLUS | ALL
+
+# Or with Vertex AI
+./scripts/local_test.sh \
+  --org-id YOUR_ORG_ID \
+  --project YOUR_GCP_PROJECT \
+  --mode B
 ```
 
 The script:

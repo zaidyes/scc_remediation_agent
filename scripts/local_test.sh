@@ -4,11 +4,13 @@
 # a real GCP org (dry-run, no resources are modified).
 #
 # Usage:
-#   ./scripts/local_test.sh --org-id ORG_ID --project YOUR_GCP_PROJECT [options]
+#   ./scripts/local_test.sh --org-id ORG_ID [options]
 #
 # Options:
 #   --org-id          GCP organisation ID (required)
-#   --project         GCP project ID for Vertex AI + Firestore (required)
+#   --api-key         AI Studio API key — use instead of Vertex AI / project
+#                     Get one free at https://aistudio.google.com/apikey
+#   --project         GCP project ID — only needed if using Vertex AI (no --api-key)
 #   --project-ids     Comma-separated project IDs to scope findings to
 #                     (default: all projects in org)
 #   --severity        CRITICAL_ONLY | HIGH_PLUS (default) | MEDIUM_PLUS | ALL
@@ -18,23 +20,26 @@
 #   --skip-ingestion  Skip graph ingestion step
 #
 # Prerequisites:
-#   - gcloud CLI installed and authenticated
+#   - gcloud CLI installed and authenticated (org-level read roles)
 #   - Docker Desktop running (for mode B)
 #   - uv installed (https://astral.sh/uv)
 #
-# Required GCP permissions (on the org or folders/projects in scope):
+# Required GCP permissions (grant at org level):
 #   roles/securitycenter.findingsViewer   — read SCC findings
 #   roles/cloudasset.viewer               — read Cloud Asset Inventory
 #   roles/iam.securityReviewer            — analyzeIamPolicy calls
 #   roles/compute.viewer                  — network/instance metadata
-#   roles/datastore.user                  — read/write Firestore (test project)
-#   roles/aiplatform.user                 — Vertex AI / Gemini calls (test project)
+#
+# For Vertex AI (if not using --api-key, grant on the project):
+#   roles/aiplatform.user
+#   roles/datastore.user                  — Firestore (only if not using emulator)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 ORG_ID=""
 PROJECT=""
+API_KEY=""
 PROJECT_IDS=""
 SEVERITY="HIGH_PLUS"
 CUSTOMER_ID="local-test"
@@ -47,6 +52,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --org-id)        ORG_ID="$2";        shift 2 ;;
     --project)       PROJECT="$2";       shift 2 ;;
+    --api-key)       API_KEY="$2";       shift 2 ;;
     --project-ids)   PROJECT_IDS="$2";   shift 2 ;;
     --severity)      SEVERITY="$2";      shift 2 ;;
     --customer-id)   CUSTOMER_ID="$2";   shift 2 ;;
@@ -57,8 +63,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$ORG_ID" || -z "$PROJECT" ]]; then
-  echo "Usage: $0 --org-id ORG_ID --project GCP_PROJECT [options]"
+if [[ -z "$ORG_ID" ]]; then
+  echo "Usage: $0 --org-id ORG_ID [--api-key AI_STUDIO_KEY | --project GCP_PROJECT] [options]"
+  exit 1
+fi
+
+# --api-key and --project are mutually exclusive; one is required for the LLM
+if [[ -z "$API_KEY" && -z "$PROJECT" ]]; then
+  echo "Error: provide either --api-key (AI Studio, free) or --project (Vertex AI)"
+  echo ""
+  echo "  AI Studio key (no GCP project needed):"
+  echo "    https://aistudio.google.com/apikey"
+  echo ""
+  echo "  Or a GCP project with Vertex AI enabled:"
+  echo "    gcloud services enable aiplatform.googleapis.com --project=YOUR_PROJECT"
   exit 1
 fi
 
@@ -70,7 +88,11 @@ echo ""
 echo "══════════════════════════════════════════════════════"
 echo "  SCC Remediation Agent — Local Test Setup"
 echo "  Org     : $ORG_ID"
-echo "  Project : $PROJECT"
+if [[ -n "$API_KEY" ]]; then
+echo "  LLM     : AI Studio (no GCP project needed)"
+else
+echo "  LLM     : Vertex AI (project: $PROJECT)"
+fi
 echo "  Mode    : $MODE ($([ "$MODE" = "A" ] && echo "interactive chat" || echo "full dry-run batch"))"
 echo "══════════════════════════════════════════════════════"
 echo ""
@@ -93,10 +115,13 @@ echo "  ✓ Dependencies ready"
 # ── Step 3: Write .env ───────────────────────────────────────────────────────
 echo ""
 echo "▶ Writing .env..."
-cat > .env <<EOF
-GOOGLE_CLOUD_PROJECT=${PROJECT}
+if [[ -n "$API_KEY" ]]; then
+  # AI Studio path — no real GCP project needed for the LLM
+  cat > .env <<EOF
+GOOGLE_GENAI_USE_VERTEXAI=False
+GOOGLE_API_KEY=${API_KEY}
+GOOGLE_CLOUD_PROJECT=local-test
 GOOGLE_CLOUD_LOCATION=us-central1
-GOOGLE_GENAI_USE_VERTEXAI=True
 ORG_ID=${ORG_ID}
 CUSTOMER_ID=${CUSTOMER_ID}
 MODEL_ID=gemini-3-flash-preview
@@ -105,6 +130,21 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j
 NEO4J_PASSWORD=localpassword
 EOF
+else
+  # Vertex AI path
+  cat > .env <<EOF
+GOOGLE_GENAI_USE_VERTEXAI=True
+GOOGLE_CLOUD_PROJECT=${PROJECT}
+GOOGLE_CLOUD_LOCATION=us-central1
+ORG_ID=${ORG_ID}
+CUSTOMER_ID=${CUSTOMER_ID}
+MODEL_ID=gemini-3-flash-preview
+PLANNING_MODEL_ID=gemini-3.1-pro-preview
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USERNAME=neo4j
+NEO4J_PASSWORD=localpassword
+EOF
+fi
 
 if [[ "$MODE" == "B" ]]; then
   echo "FIRESTORE_EMULATOR_HOST=localhost:8080" >> .env
