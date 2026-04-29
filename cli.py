@@ -628,48 +628,117 @@ def _fmt_triage(d: dict) -> str:
     dormant = d.get("is_dormant")
     score   = d.get("attack_exposure_score")
     rat     = d.get("rationale", "")
-    parts = []
+    in_scope = d.get("in_scope")
+
+    meta = []
     if sev:
-        parts.append(f"Severity: {sev}")
+        meta.append(f"Severity: {sev}")
+    if in_scope is not None:
+        meta.append("in scope" if in_scope else "out of scope")
     if dormant is not None:
-        parts.append("asset is dormant" if dormant else "asset is active")
+        meta.append("asset dormant" if dormant else "asset active")
     if score is not None:
-        parts.append(f"attack exposure {score}")
+        meta.append(f"exposure {score}")
+
+    lines = [f"## Triage  —  {'  ·  '.join(meta) if meta else 'complete'}"]
     if rat:
-        parts.append(rat)
-    return "  ".join(parts) if parts else "complete"
+        lines += ["", rat]
+    return "\n".join(lines)
 
 
 def _fmt_impact(d: dict) -> str:
     level   = d.get("blast_level", "")
-    count   = d.get("blast_radius_count") or len(d.get("blast_radius_assets", []))
+    assets  = d.get("blast_radius_assets", [])
+    count   = d.get("blast_radius_count") or len(assets)
     exposed = d.get("internet_exposed")
-    parts = []
+    iam     = d.get("iam_paths", [])
+
+    meta = []
     if level:
-        parts.append(f"Blast radius: {level}")
+        meta.append(f"Blast radius: {level}")
     if count:
-        parts.append(f"{count} downstream resource{'s' if count != 1 else ''}")
+        meta.append(f"{count} downstream resource{'s' if count != 1 else ''}")
     if exposed:
-        parts.append("internet-exposed")
-    return "  ·  ".join(parts) if parts else "complete"
+        meta.append("internet-exposed")
+
+    lines = [f"## Impact  —  {'  ·  '.join(meta) if meta else 'complete'}"]
+
+    if assets:
+        lines += ["", "## Affected resources"]
+        for a in assets[:8]:
+            name = a.get("asset_name", str(a)).split("/")[-1]
+            env  = a.get("env", "")
+            lines.append(f"  · {name}" + (f"  ({env})" if env else ""))
+        if len(assets) > 8:
+            lines.append(f"  … and {len(assets) - 8} more")
+
+    if iam:
+        lines += ["", "## IAM privilege paths"]
+        for path in iam[:3]:
+            lines.append(f"  · {path}")
+
+    return "\n".join(lines)
 
 
 def _fmt_plan(d: dict) -> str:
-    status     = d.get("status", "")
-    confidence = d.get("confidence", "")
-    steps      = len(d.get("steps", []))
-    downtime   = d.get("estimated_downtime_minutes")
-    blocked    = d.get("block_reason", "")
+    status    = d.get("status", "")
+    blocked   = d.get("block_reason", "")
+
     if status == "BLOCKED":
-        return f"BLOCKED — {blocked}"
-    parts = []
+        lines = ["## Remediation Plan  —  BLOCKED", "", f"  {blocked}"]
+        return "\n".join(lines)
+
+    confidence   = d.get("confidence", "")
+    downtime     = d.get("estimated_downtime_minutes")
+    reboot       = d.get("requires_reboot", False)
+    change_win   = d.get("change_window_required", False)
+    summary      = d.get("summary", "")
+    risk         = d.get("risk_assessment", "")
+    steps        = d.get("steps", [])
+    rollback     = d.get("rollback_steps", [])
+
+    meta = []
     if confidence:
-        parts.append(f"Confidence: {confidence}")
-    if steps:
-        parts.append(f"{steps} step{'s' if steps != 1 else ''}")
+        meta.append(f"Confidence: {confidence}")
     if downtime is not None:
-        parts.append(f"~{downtime} min downtime")
-    return "  ·  ".join(parts) if parts else "ready"
+        meta.append(f"~{downtime} min downtime")
+    if reboot:
+        meta.append("reboot required")
+    if change_win:
+        meta.append("change window required")
+
+    lines = [f"## Remediation Plan  —  {' · '.join(meta)}"]
+
+    if summary:
+        lines += ["", "## Summary", summary]
+
+    if risk:
+        lines += ["", "## Risk assessment", risk]
+
+    if steps:
+        lines += ["", "## Steps"]
+        for s in steps:
+            order  = s.get("order", "")
+            action = s.get("action", "")
+            cmd    = s.get("api_call", "")
+            verify = s.get("verification", "")
+            lines.append(f"  {order}. {action}")
+            if cmd:
+                lines.append(f"     {cmd}")
+            if verify:
+                lines.append(f"     Verify: {verify}")
+
+    if rollback:
+        lines += ["", "## Rollback"]
+        for s in rollback:
+            order  = s.get("order", "")
+            action = s.get("action", "")
+            cmd    = s.get("api_call", "")
+            lines.append(f"  {order}. {action}")
+            if cmd:
+                lines.append(f"     {cmd}")
+
+    return "\n".join(lines)
 
 
 def _fmt_verify(d: dict) -> str:
@@ -700,8 +769,12 @@ def _translate_pipeline_json(text: str) -> str:
     for key, (stage_name, formatter) in _PIPELINE_KEYS.items():
         if key in obj:
             detail = formatter(obj[key])
-            icon = _c("✓", _GREEN, _BOLD)
-            label = _c(f"{stage_name}", _BOLD)
+            # If the formatter used ## sections, return as-is (## renderer handles styling)
+            if "\n" in detail or detail.startswith("##"):
+                return detail
+            # Plain one-liner — prefix with ✓ Stage indicator
+            icon  = _c("✓", _GREEN, _BOLD)
+            label = _c(stage_name, _BOLD)
             return f"{icon} {label}  {_c(detail, _GREY)}"
 
     return text  # JSON but not a known pipeline key

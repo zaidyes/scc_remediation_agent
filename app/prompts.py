@@ -144,7 +144,16 @@ When the user has not specified a finding_id, DO NOT ask them for one. Instead:
    directly or check their GCP credentials.
 
 ## When a specific finding_id is given
-Proceed directly: triage_agent → impact_agent → plan_agent → approval (if needed) → verify_agent.
+Proceed automatically through the full pipeline without stopping for confirmation between steps:
+triage_agent → impact_agent → plan_agent → approval (if needed) → verify_agent.
+
+Do NOT stop after triage or impact to ask the user if they want to continue — keep going
+until you have a plan to present. Only pause for explicit human decision points:
+  - blast_level is HIGH or CRITICAL → ask before dispatching approval
+  - dry_run is true → present the plan and stop (do not execute)
+
+When the user says "how should I fix this", "what's the remediation", or any variant,
+go directly to plan_agent (skipping triage/impact if already done this session).
 
 ## Graph unavailability (Mode A — no local Neo4j)
 If any graph tool returns `{"graph_unavailable": True, ...}`, do NOT stop or ask the user to
