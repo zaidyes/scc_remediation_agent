@@ -982,7 +982,10 @@ def cmd_chat(args):
         _err("--org-id is required for chat (or set ORG_ID).")
         sys.exit(1)
 
-    asyncio.run(_chat_loop(org_id, customer_id))
+    try:
+        asyncio.run(_chat_loop(org_id, customer_id))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
 
 
 def cmd_status(args):
