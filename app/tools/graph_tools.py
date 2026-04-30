@@ -12,11 +12,31 @@ _graph_unavailable: bool = False
 
 
 @lru_cache(maxsize=1)
-def _get_driver() -> Driver:
+def _get_driver() -> Driver | None:
+    """
+    Returns a connected Neo4j driver, or None if the server is unreachable.
+
+    connection_timeout=3 makes the first unavailability fail in ≤3 s instead of
+    blocking for the OS TCP timeout (which can be 60–120 s for a k8s hostname that
+    doesn't resolve).  verify_connectivity() probes immediately so the failure is
+    detected here rather than on the first query call.
+    """
+    global _graph_unavailable
     # NEO4J_PASSWORD (set by .env / local_test.sh) takes precedence over a
     # Secret Manager secret name, so Mode A works without Secret Manager access.
     password = os.environ.get("NEO4J_PASSWORD") or _read_secret(NEO4J_PASSWORD_SECRET)
-    return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, password))
+    try:
+        driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, password),
+            connection_timeout=3.0,       # fail fast — don't block the agent turn
+            max_transaction_retry_time=0, # no retries; surface failure immediately
+        )
+        driver.verify_connectivity()      # probe now, not on first query
+        return driver
+    except Exception:
+        _graph_unavailable = True
+        return None
 
 
 def _read_secret(secret_id: str) -> str:
@@ -39,6 +59,8 @@ def _run_query(cypher: str, params: dict = None) -> list[dict]:
         return []
     try:
         driver = _get_driver()
+        if driver is None:
+            return []
         with driver.session() as session:
             result = session.run(cypher, params or {})
             return [dict(record) for record in result]
@@ -53,6 +75,8 @@ def _run_write(cypher: str, params: dict = None) -> None:
         return
     try:
         driver = _get_driver()
+        if driver is None:
+            return
         with driver.session() as session:
             session.execute_write(lambda tx: tx.run(cypher, params or {}))
     except Exception:
@@ -73,6 +97,8 @@ def get_resource_scope_status(asset_name: str, scope_config) -> dict:
 
 # Resource metadata
 def get_resource_metadata(asset_name: str) -> dict:
+    if _graph_unavailable:
+        return {"graph_unavailable": True, "note": "Neo4j not running — resource metadata unavailable in Mode A"}
     rows = _run_query(
         "MATCH (r:Resource {asset_name: $name}) RETURN r.env AS env, r.team AS team, r.owner_email AS owner_email, r.data_class AS data_class, r.status AS status, r.maint_window AS maint_window, r.labels AS labels, r.dormancy_score AS dormancy_score, r.last_activity AS last_activity",
         {"name": asset_name}
@@ -104,6 +130,14 @@ def query_dependency_chain(asset_name: str, max_hops: int = 3) -> dict:
     what other resources share those same dependencies, and its SA privilege chain.
     Used by the plan agent to assess change risk before generating a remediation plan.
     """
+    if _graph_unavailable:
+        return {
+            "graph_unavailable": True,
+            "note": "Neo4j not running — dependency chain unavailable in Mode A",
+            "upstream_dependencies": [],
+            "shared_dependency_exposure": [],
+            "service_account_chain": [],
+        }
     upstream = _run_query(
         f"MATCH path = (target:Resource {{asset_name: $asset_name}})"
         f"-[:DEPENDS_ON|HOSTED_BY|USES_SERVICE_ACCOUNT*1..{max_hops}]->(upstream:Resource) "
@@ -152,6 +186,8 @@ def query_dependency_chain(asset_name: str, max_hops: int = 3) -> dict:
 
 
 def query_iam_paths(asset_name: str) -> list[dict]:
+    if _graph_unavailable:
+        return [{"graph_unavailable": True, "note": "Neo4j not running — IAM paths unavailable in Mode A"}]
     rows = _run_query(
         "MATCH (vuln:Resource {asset_name: $asset_name})<-[:GRANTS_ACCESS_TO]-(sa:Resource) MATCH (sa)-[:GRANTS_ACCESS_TO]->(prod:Resource {env: 'prod'}) WHERE prod.asset_name <> $asset_name RETURN sa.asset_name AS service_account, sa.short_name AS sa_email, collect(DISTINCT prod.asset_name)[..10] AS reachable_prod_resources, count(DISTINCT prod) AS prod_blast_count ORDER BY prod_blast_count DESC LIMIT 10",
         {"asset_name": asset_name}
