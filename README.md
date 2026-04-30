@@ -735,9 +735,9 @@ For deployment outside Agent Garden, use the [Quickstart](#quickstart) above.
 
 ---
 
-## Planned: security validation layers
+## Security validation layers
 
-Three deterministic validation layers are planned between plan generation and execution. None of these require an additional LLM call — they are static analysis and live API checks applied to the plan's structured output.
+Three deterministic validation layers run between plan generation and execution. None require an additional LLM call — they are static analysis and live API checks applied to the plan's structured output.
 
 ```
 plan_agent output
