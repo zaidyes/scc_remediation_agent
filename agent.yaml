@@ -12,8 +12,8 @@ tags: [security, scc, remediation, gcp, vulnerability-management]
 entrypoint: app/agent.py
 
 model:
-  reasoning: gemini-3-flash-preview
-  planning: gemini-3.1-pro-preview
+  reasoning: gemini-2.5-flash
+  planning: gemini-2.5-pro
 
 tools:
   - name: get_finding_detail
@@ -34,6 +34,12 @@ tools:
     module: app/tools/osconfig_tools.py
   - name: dispatch_approval_request
     module: app/tools/approval_tools.py
+  - name: list_active_findings
+    module: app/tools/scc_tools.py
+  - name: validate_plan
+    module: app/tools/validate_plan_tool.py
+  - name: record_audit_entry
+    module: app/tools/audit_tools.py
 
 triggers:
   - type: schedule
@@ -69,9 +75,13 @@ marketplace:
   required_permissions:
     - securitycenter.findings.list
     - securitycenter.findings.setMute
+    - securitycenter.findings.update
     - cloudasset.assets.listResource
     - osconfig.patchJobs.create
     - iam.roles.list
+    - iam.projects.getIamPolicy
+    - iam.projects.setIamPolicy
     - cloudtasks.tasks.create
+    - firestore.documents.read
     - firestore.documents.write
   deployment_type: customer_project

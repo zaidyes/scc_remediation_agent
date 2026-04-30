@@ -11,10 +11,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-# Stub GCP packages before importing app modules
+# Stub GCP packages before importing app modules.
+# network_management_v1 is needed by verify_agent.py (not in venv).
 for _name in (
     "google.cloud.compute_v1",
     "google.cloud.logging_v2",
+    "google.cloud.network_management_v1",
     "google.cloud.osconfig_v1",
     "google.cloud.osconfig_v1.types",
     "google.cloud.osconfig_v1.types.inventory",
@@ -27,7 +29,11 @@ for _name in (
         mod = _types.ModuleType(_name)
         sys.modules[_name] = mod
 
-# Stub ADK and agent modules that cascade-import GCP SDKs
+# Stub ADK modules and the handful of app modules whose transitive imports
+# cannot be satisfied in the test environment (no live GCP / no ADK runner).
+# Agent modules (triage, impact, dormancy, plan, preflight) are NOT stubbed
+# here so that test_security_layers.py and test_triage_agent.py can import
+# the real implementations from the same pytest session.
 for _name in (
     "google.adk",
     "google.adk.agents",
@@ -36,12 +42,7 @@ for _name in (
     "google.adk.runners",
     "google.genai",
     "google.genai.types",
-    "app.agents.preflight_agent",
-    "app.agents.triage_agent",
-    "app.agents.impact_agent",
-    "app.agents.dormancy_agent",
-    "app.agents.plan_agent",
-    "app.agents.verify_agent",
+    "app.agents.verify_agent",   # imports network_management_v1 (not in venv)
     "app.agent",
     "app.tools.approval_tools",
     "app.tools.osconfig_tools",
@@ -63,11 +64,10 @@ sys.modules["google.adk.tools"].FunctionTool = MagicMock
 sys.modules["google.adk.tools.function_tool"].FunctionTool = MagicMock
 sys.modules["app.agent"].root_agent = MagicMock()
 
-# Symbols imported by app/main.py from its stubs
-sys.modules["app.agents.triage_agent"].TriageAgent = MagicMock
-sys.modules["app.agents.impact_agent"].ImpactAgent = MagicMock
-sys.modules["app.agents.dormancy_agent"].DormancyAgent = MagicMock
-sys.modules["app.agents.plan_agent"].PlanAgent = MagicMock
+# Symbols needed by app/main.py from stubs that remain
+sys.modules["app.agents.verify_agent"].VerifyAgent = MagicMock
+# agent_output is stubbed but plan_agent.py imports compact_impact_for_plan from it
+sys.modules["app.tools.agent_output"].compact_impact_for_plan = MagicMock(return_value={})
 sys.modules["app.agents.verify_agent"].VerifyAgent = MagicMock
 sys.modules["app.tools.approval_tools"].dispatch_approval_request = AsyncMock()
 sys.modules["app.tools.osconfig_tools"].create_patch_job = MagicMock()
