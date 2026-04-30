@@ -266,6 +266,125 @@ class TestCompileplan:
 
 
 # ---------------------------------------------------------------------------
+# Check 4b — set-iam-policy and terraform apply argument guards
+# ---------------------------------------------------------------------------
+
+def _misc_finding():
+    return {
+        "resource_name": "//cloudresourcemanager.googleapis.com/projects/my-project",
+        "finding_class": "MISCONFIGURATION",
+    }
+
+
+class TestArgumentGuards:
+
+    # ── set-iam-policy ────────────────────────────────────────────────────
+
+    def test_set_iam_policy_with_file_passes(self):
+        plan = _make_plan(
+            remediation_type="IAM",
+            steps=[{"order": 1, "api_call": "gcloud projects set-iam-policy my-project policy.json --project=my-project"}],
+        )
+        finding = {"resource_name": "//cloudresourcemanager.googleapis.com/projects/my-project", "finding_class": "IAM_POLICY"}
+        result = compile_plan(plan, finding)
+        assert result.passed, result.violations
+
+    def test_set_iam_policy_without_file_blocked(self):
+        """No file arg — would read from stdin."""
+        plan = _make_plan(
+            remediation_type="IAM",
+            steps=[{"order": 1, "api_call": "gcloud projects set-iam-policy my-project --project=my-project"}],
+        )
+        finding = {"resource_name": "//cloudresourcemanager.googleapis.com/projects/my-project", "finding_class": "IAM_POLICY"}
+        result = compile_plan(plan, finding)
+        assert not result.passed
+        assert any("policy file" in v for v in result.violations)
+
+    def test_set_iam_policy_stdin_dash_blocked(self):
+        """Explicit '-' reads from stdin."""
+        plan = _make_plan(
+            remediation_type="IAM",
+            steps=[{"order": 1, "api_call": "gcloud projects set-iam-policy my-project - --project=my-project"}],
+        )
+        finding = {"resource_name": "//cloudresourcemanager.googleapis.com/projects/my-project", "finding_class": "IAM_POLICY"}
+        result = compile_plan(plan, finding)
+        assert not result.passed
+        assert any("stdin" in v for v in result.violations)
+
+    def test_set_iam_policy_also_checked_in_rollback(self):
+        """Same file-argument rule applies to rollback steps."""
+        plan = {
+            "remediation_type": "IAM",
+            "asset_name": "//cloudresourcemanager.googleapis.com/projects/my-project",
+            "steps": [{"order": 1, "api_call": "gcloud projects remove-iam-policy-binding my-project --member=user:a@b.com --role=roles/editor"}],
+            "rollback_steps": [{"order": 1, "api_call": "gcloud projects set-iam-policy my-project --project=my-project"}],
+        }
+        finding = {"resource_name": "//cloudresourcemanager.googleapis.com/projects/my-project", "finding_class": "IAM_POLICY"}
+        result = validate_rollback_steps(plan, finding)
+        assert not result.passed
+        assert any("policy file" in v for v in result.violations)
+
+    # ── terraform apply ───────────────────────────────────────────────────
+
+    def test_terraform_apply_with_target_passes(self):
+        plan = _make_plan(
+            remediation_type="MISCONFIGURATION",
+            steps=[{"order": 1, "api_call": "terraform apply -target=google_compute_firewall.allow_ssh"}],
+        )
+        result = compile_plan(plan, _misc_finding())
+        assert result.passed, result.violations
+
+    def test_terraform_apply_with_plan_file_passes(self):
+        plan = _make_plan(
+            remediation_type="MISCONFIGURATION",
+            steps=[{"order": 1, "api_call": "terraform apply remediation.tfplan"}],
+        )
+        result = compile_plan(plan, _misc_finding())
+        assert result.passed, result.violations
+
+    def test_terraform_apply_bare_blocked(self):
+        """No target or plan file — applies all pending changes."""
+        plan = _make_plan(
+            remediation_type="MISCONFIGURATION",
+            steps=[{"order": 1, "api_call": "terraform apply"}],
+        )
+        result = compile_plan(plan, _misc_finding())
+        assert not result.passed
+        assert any("target" in v for v in result.violations)
+
+    def test_terraform_apply_auto_approve_only_blocked(self):
+        """-auto-approve is a flag, not a target/plan file."""
+        plan = _make_plan(
+            remediation_type="MISCONFIGURATION",
+            steps=[{"order": 1, "api_call": "terraform apply -auto-approve"}],
+        )
+        result = compile_plan(plan, _misc_finding())
+        assert not result.passed
+        assert any("target" in v for v in result.violations)
+
+    def test_terraform_apply_target_with_auto_approve_passes(self):
+        """Target flag + auto-approve is fine — scope is limited."""
+        plan = _make_plan(
+            remediation_type="MISCONFIGURATION",
+            steps=[{"order": 1, "api_call": "terraform apply -auto-approve -target=google_compute_firewall.allow_ssh"}],
+        )
+        result = compile_plan(plan, _misc_finding())
+        assert result.passed, result.violations
+
+    def test_terraform_apply_also_checked_in_rollback(self):
+        """Same target/plan-file rule applies to rollback steps."""
+        plan = {
+            "remediation_type": "MISCONFIGURATION",
+            "asset_name": "//cloudresourcemanager.googleapis.com/projects/my-project",
+            "steps": [{"order": 1, "api_call": "terraform apply -target=google_compute_firewall.allow_ssh"}],
+            "rollback_steps": [{"order": 1, "api_call": "terraform apply -auto-approve"}],
+        }
+        result = validate_rollback_steps(plan, _misc_finding())
+        assert not result.passed
+        assert any("target" in v for v in result.violations)
+
+
+# ---------------------------------------------------------------------------
 # Layer A — Policy engine
 # ---------------------------------------------------------------------------
 

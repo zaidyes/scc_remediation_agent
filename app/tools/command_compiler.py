@@ -236,6 +236,102 @@ def _starts_with_any(cmd: str, prefixes: tuple[str, ...]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Check 4b — Argument-level guards for high-blast commands
+# ---------------------------------------------------------------------------
+# These run after the whitelist check (the command is already confirmed to be
+# an allowed mutating command) to enforce that the specific arguments used
+# don't widen the blast radius back to an unsafe level.
+
+def _check_set_iam_policy_args(cmd: str, order) -> str | None:
+    """
+    gcloud projects set-iam-policy replaces the *entire* project IAM policy.
+    It must be called with an explicit file path — not stdin ('-'), which
+    allows piped or heredoc content that is harder to audit.
+
+    Valid:   gcloud projects set-iam-policy my-project policy.json
+    Invalid: gcloud projects set-iam-policy my-project          (no file → reads stdin)
+    Invalid: gcloud projects set-iam-policy my-project -        (explicit stdin)
+
+    Returns a violation string or None if the command is acceptable.
+    """
+    if "set-iam-policy" not in cmd:
+        return None
+
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        return None
+
+    try:
+        idx = next(i for i, t in enumerate(tokens) if t == "set-iam-policy")
+    except StopIteration:
+        return None
+
+    # Positional args after "set-iam-policy": first is project ID, second is file
+    positionals = [t for t in tokens[idx + 1:] if not t.startswith("-")]
+
+    if len(positionals) < 2:
+        return (
+            f"Step {order}: gcloud projects set-iam-policy requires an explicit policy "
+            "file argument (e.g. policy.json). Without a file the command reads from "
+            "stdin — supply a file path to make the policy change auditable."
+        )
+
+    if positionals[1] == "-":
+        return (
+            f"Step {order}: gcloud projects set-iam-policy with '-' reads the policy "
+            "from stdin, which is not permitted — use an explicit file path instead."
+        )
+
+    return None
+
+
+def _check_terraform_apply_args(cmd: str, order) -> str | None:
+    """
+    terraform apply without a -target flag or a plan file applies *all* pending
+    changes in the Terraform state, which is too broad for a single remediation
+    action and may change unrelated resources.
+
+    Valid:   terraform apply -target=google_compute_firewall.rule
+    Valid:   terraform apply remediation.tfplan
+    Invalid: terraform apply
+    Invalid: terraform apply -auto-approve
+
+    Returns a violation string or None if the command is acceptable.
+    """
+    if not _normalise(cmd).startswith("terraform apply"):
+        return None
+
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+
+    # -target or --target scopes the apply to a specific resource
+    has_target = any(
+        t.startswith("-target") or t.startswith("--target") for t in tokens
+    )
+    if has_target:
+        return None
+
+    # A positional argument after 'apply' is a plan file
+    try:
+        idx = tokens.index("apply")
+    except ValueError:
+        return None
+
+    positionals = [t for t in tokens[idx + 1:] if not t.startswith("-")]
+    if positionals:
+        return None  # Plan file present — scoped apply
+
+    return (
+        f"Step {order}: terraform apply without a -target flag or plan file will apply "
+        "all pending state changes — use -target=<resource_type.resource_name> or "
+        "supply an explicit .tfplan file to scope the apply to the remediated resource."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Core compiler
 # ---------------------------------------------------------------------------
 
@@ -331,6 +427,14 @@ def compile_plan(plan: dict, finding: dict) -> CompilerResult:
                     f"Allowed mutating commands: {allowed_hint}."
                 )
 
+        # ── 4b. Argument-level guards ──────────────────────────────────────
+        v = _check_set_iam_policy_args(cmd, order)
+        if v:
+            violations.append(v)
+        v = _check_terraform_apply_args(cmd, order)
+        if v:
+            violations.append(v)
+
         # ── 5. Project scope ──────────────────────────────────────────────
         if finding_project and cmd.startswith("gcloud"):
             cmd_project = _extract_project_from_cmd(cmd)
@@ -417,6 +521,14 @@ def validate_rollback_steps(plan: dict, finding: dict) -> CompilerResult:
                     f"Allowed rollback commands: {allowed_hint}."
                 )
                 continue
+
+        # ── 2b. Argument-level guards (same rules apply in rollback context) ─
+        v = _check_set_iam_policy_args(cmd, order)
+        if v:
+            violations.append(v.replace("Step", "Rollback step", 1))
+        v = _check_terraform_apply_args(cmd, order)
+        if v:
+            violations.append(v.replace("Step", "Rollback step", 1))
 
         # ── 3. Project scope ──────────────────────────────────────────────
         if finding_project and cmd.startswith("gcloud"):
