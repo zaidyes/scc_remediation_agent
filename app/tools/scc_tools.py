@@ -2,9 +2,39 @@
 SCC tools — all calls use the Security Command Center v2 API.
 The v1 API has been retired for this organisation.
 """
+import re
 from google.cloud import securitycenter_v2
 
 _SEV_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "SEVERITY_UNSPECIFIED": 9}
+
+# ---------------------------------------------------------------------------
+# Prompt-injection sanitisation
+# ---------------------------------------------------------------------------
+# Finding fields originate from GCP API data that could be influenced by
+# anyone who can set resource metadata or write SCC findings.  Strip
+# characters that would let injected text masquerade as prompt instructions
+# when the field is interpolated into an LLM prompt.
+#
+# We remove:
+#   - Markdown section headers (##, ###, etc.) — look like prompt sections
+#   - Code fence openers (```) — can embed arbitrary text blocks
+#   - XML/HTML-style closing tags that could escape our <data> wrappers
+# We do NOT strip newlines or sentence-level punctuation — that would mangle
+# legitimate remediation guidance text.
+
+_INJECTION_RE = re.compile(
+    r"(^#{1,6}\s"   # ## Section headers at line start
+    r"|^```"        # Code fence openers at line start
+    r"|</[a-z])",   # XML closing tags (e.g. </preflight>, </instructions>)
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _sanitise(value: str) -> str:
+    """Strip prompt-injection control sequences from a finding text field."""
+    if not isinstance(value, str):
+        return value
+    return _INJECTION_RE.sub("", value).strip()
 
 
 def list_active_findings(
@@ -123,17 +153,18 @@ def get_finding_detail(finding_id: str, org_id: str) -> dict:
                 src_props = {}
             return {
                 "finding_id":            f.name,
-                "category":              f.category,
+                "category":              _sanitise(f.category),
                 "severity":              sev_name,
                 "state":                 state_name,
                 "resource_name":         resource,
                 "resource_short":        resource.split("/")[-1] if resource else "",
                 "event_time":            f.event_time.isoformat() if f.event_time else None,
                 "attack_exposure_score": score,
-                "description":           f.description or "",
-                "remediation_text":      getattr(f, "next_steps", "") or "",
+                "description":           _sanitise(f.description or ""),
+                "remediation_text":      _sanitise(getattr(f, "next_steps", "") or ""),
                 "external_uri":          f.external_uri or "",
-                "source_properties":     src_props,
+                "source_properties":     {k: _sanitise(v) if isinstance(v, str) else v
+                                          for k, v in src_props.items()},
             }
         return {}
 

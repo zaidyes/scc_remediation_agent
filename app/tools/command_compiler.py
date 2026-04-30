@@ -152,6 +152,23 @@ def _starts_with_any(cmd: str, prefixes: tuple[str, ...]) -> bool:
 # Core compiler
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Check 0 — Intent alignment
+# ---------------------------------------------------------------------------
+# Maps the finding's finding_class to the remediation_type the plan should
+# have.  A mismatch is a signal that the plan was generated for the wrong
+# finding, or that a prompt injection redirected the model to a different
+# action class.
+# ---------------------------------------------------------------------------
+
+_FINDING_CLASS_TO_REMEDIATION_TYPE: dict[str, str] = {
+    "VULNERABILITY":    "OS_PATCH",
+    "MISCONFIGURATION": "MISCONFIGURATION",
+    "IAM_POLICY":       "IAM",
+    "NETWORK":          "FIREWALL",
+}
+
+
 def compile_plan(plan: dict, finding: dict) -> CompilerResult:
     """
     Validates every api_call in plan["steps"] and plan["rollback_steps"].
@@ -165,6 +182,19 @@ def compile_plan(plan: dict, finding: dict) -> CompilerResult:
 
     allowed_mutating = _ALLOWED_MUTATING.get(remediation_type, ())
     violations: list[str] = []
+
+    # ── 0. Intent alignment ───────────────────────────────────────────────
+    finding_class = finding.get("finding_class", "")
+    expected_type = _FINDING_CLASS_TO_REMEDIATION_TYPE.get(finding_class)
+    if expected_type and remediation_type != expected_type:
+        violations.append(
+            f"Plan remediation_type '{remediation_type}' does not match "
+            f"finding_class '{finding_class}' (expected '{expected_type}'). "
+            "Possible prompt injection or misrouted plan."
+        )
+        # Return immediately — mismatched type means the per-type whitelist
+        # checks below would use the wrong allowed set.
+        return CompilerResult(passed=False, violations=violations)
 
     all_steps = list(plan.get("steps", [])) + list(plan.get("rollback_steps", []))
 

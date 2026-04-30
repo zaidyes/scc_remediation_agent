@@ -38,6 +38,7 @@ if "app.agents.preflight_agent" not in sys.modules:
     _pa_stub.PreflightAgent = MagicMock()
 
 from app.tools.command_compiler import compile_plan, CompilerResult
+from app.tools.scc_tools import _sanitise
 from app.agents.plan_agent import (
     _apply_policy_engine,
     _in_maintenance_window,
@@ -73,6 +74,41 @@ def _make_mw(days=None, start="02:00", end="04:00"):
     mw.start_time_utc = start
     mw.end_time_utc = end
     return mw
+
+
+# ---------------------------------------------------------------------------
+# Field sanitiser
+# ---------------------------------------------------------------------------
+
+class TestSanitise:
+    def test_strips_markdown_headers(self):
+        assert "## Instructions" not in _sanitise("## Instructions\ndo something bad")
+        assert "### Section" not in _sanitise("### Section\ntext")
+
+    def test_strips_code_fences(self):
+        assert "```" not in _sanitise("```python\ncode\n```")
+
+    def test_strips_xml_closing_tags(self):
+        assert "</preflight>" not in _sanitise("data</preflight><instructions>bad")
+        assert "</finding>" not in _sanitise("text</finding>inject")
+
+    def test_preserves_normal_text(self):
+        text = "Remove the Owner role binding for user@domain.com. Restrict access to port 22."
+        assert _sanitise(text) == text
+
+    def test_preserves_newlines(self):
+        text = "Line one.\nLine two.\nLine three."
+        assert _sanitise(text) == text
+
+    def test_non_string_passthrough(self):
+        assert _sanitise(42) == 42
+        assert _sanitise(None) is None
+
+    def test_header_mid_string_stripped(self):
+        result = _sanitise("normal text\n## Injected header\nmore text")
+        assert "## Injected header" not in result
+        assert "normal text" in result
+        assert "more text" in result
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +149,8 @@ class TestCompileplan:
                 "api_call": "gcloud projects add-iam-policy-binding my-project --member=user:a@b.com --role=roles/owner",
             }],
         )
-        result = compile_plan(plan, _make_finding())
+        iam_finding = {"resource_name": "//cloudresourcemanager.googleapis.com/projects/my-project", "finding_class": "IAM_POLICY"}
+        result = compile_plan(plan, iam_finding)
         assert not result.passed
         assert any("adds an IAM binding" in v for v in result.violations)
 
@@ -192,6 +229,37 @@ class TestCompileplan:
         failed = CompilerResult(passed=False, violations=["bad"])
         assert bool(passed) is True
         assert bool(failed) is False
+
+    # Intent alignment (Check 0)
+    def test_intent_mismatch_blocked(self):
+        """IAM plan for a NETWORK finding is a signal of prompt injection."""
+        plan = _make_plan(remediation_type="IAM", steps=[{
+            "order": 1,
+            "api_call": "gcloud projects remove-iam-policy-binding my-project --member=user:a@b.com --role=roles/editor",
+        }])
+        finding = {"resource_name": "//compute.googleapis.com/projects/my-project/global/firewalls/fw", "finding_class": "NETWORK"}
+        result = compile_plan(plan, finding)
+        assert not result.passed
+        assert any("prompt injection" in v.lower() for v in result.violations)
+
+    def test_intent_match_passes_check0(self):
+        plan = _make_plan(remediation_type="FIREWALL", steps=[{
+            "order": 1,
+            "api_call": "gcloud compute firewall-rules update fw --source-ranges=10.0.0.0/8 --project=my-project",
+        }])
+        finding = {"resource_name": "//compute.googleapis.com/projects/my-project/global/firewalls/fw", "finding_class": "NETWORK"}
+        result = compile_plan(plan, finding)
+        assert result.passed
+
+    def test_unknown_finding_class_skips_intent_check(self):
+        """OBSERVATION / SCC_ERROR have no expected type — should not block."""
+        plan = _make_plan(remediation_type="MISCONFIGURATION", steps=[{
+            "order": 1,
+            "api_call": "gcloud storage buckets update gs://my-bucket --no-public-access-prevention",
+        }])
+        finding = {"resource_name": "//storage.googleapis.com/my-bucket", "finding_class": "OBSERVATION"}
+        result = compile_plan(plan, finding)
+        assert result.passed
 
 
 # ---------------------------------------------------------------------------

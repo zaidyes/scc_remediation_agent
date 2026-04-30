@@ -35,44 +35,95 @@ _FINDING_CLASS_TO_MODE: dict[str, str] = {
     "OBSERVATION": None,
 }
 
-_PLAN_PROMPT = """
-## Pre-flight results
+# ---------------------------------------------------------------------------
+# System instruction — contains all planning rules and the output schema.
+# Kept separate from finding data so the model treats it as authoritative
+# regardless of what the data sections contain (prompt injection defence).
+# ---------------------------------------------------------------------------
+
+_PLAN_SYSTEM_INSTRUCTION = """
+You are the SCC Plan Agent. Your sole task is to generate a safe,
+configuration-specific remediation plan as JSON.
+
+Rules:
+- Every remediation step must use exact gcloud or REST API calls with real
+  values taken from the resource_data section.  Never use placeholders.
+- Every step must have a corresponding rollback step.
+- If any preflight check has result=BLOCK: set status=BLOCKED and explain why.
+  Do not attempt to work around the blocker.
+- Set change_window_required=true if blast_level is HIGH or CRITICAL.
+- Set confidence: HIGH if all pre-flights PASS; MEDIUM if any WARN; LOW if uncertain.
+
+Output schema (JSON only, no prose):
+{
+  "plan_id": "<uuid>",
+  "status": "READY | BLOCKED",
+  "block_reason": "<only when BLOCKED>",
+  "finding_id": "<finding_id>",
+  "asset_name": "<asset_name>",
+  "remediation_type": "OS_PATCH | MISCONFIGURATION | IAM | FIREWALL",
+  "summary": "<one sentence using real resource names>",
+  "risk_assessment": "<2-3 sentences>",
+  "steps": [
+    {
+      "order": 1,
+      "action": "<description>",
+      "api_call": "<exact gcloud command with real values>",
+      "expected_outcome": "<what happens>",
+      "verification": "<how to confirm success>"
+    }
+  ],
+  "rollback_steps": [
+    {"order": 1, "action": "<rollback action>", "api_call": "<restore command>"}
+  ],
+  "estimated_downtime_minutes": 0,
+  "requires_reboot": false,
+  "confidence": "HIGH | MEDIUM | LOW",
+  "change_window_required": false
+}
+"""
+
+# ---------------------------------------------------------------------------
+# Data message — contains only finding/resource/impact data, no instructions.
+# XML tags make the boundary explicit: injected text inside a tag cannot
+# escape to the instruction level.
+# ---------------------------------------------------------------------------
+
+_PLAN_DATA_TEMPLATE = """\
+<preflight>
 {preflight_json}
+</preflight>
 
-## Full resource data (live from Asset Inventory)
+<resource_data>
 {resource_data_json}
+</resource_data>
 
-## Finding
+<finding>
 {finding_json}
+</finding>
 
-## Graph context (blast radius, IAM paths, dormancy)
+<blast_radius_and_impact>
 {impact_json}
+</blast_radius_and_impact>
 
-## SCC remediation guidance
+<remediation_guidance>
 {remediation_text}
+</remediation_guidance>
 
-## Customer config
-Enabled remediation modes: {enabled_modes}
-Dry run: {dry_run}
-
-## Instructions
-Generate a remediation plan specific to THIS resource's current configuration.
-Reference actual disk names, zones, service account emails, and flags from the
-resource data. If any pre-flight check returned BLOCK, set plan status to
-BLOCKED and explain why. Include exact gcloud commands or API calls, not
-generic patterns. Include a machine-executable rollback artifact for every step.
+<customer_config>
+enabled_modes={enabled_modes}
+dry_run={dry_run}
+</customer_config>
 """
 
 _DRY_RUN_RETRY_SUFFIX = """
-## Dry-run validation errors (attempt {attempt} of 2)
-The following commands in your previous plan referred to resources that could
-not be found or returned API errors. Fix the resource names and flags before
-regenerating the plan.
+<validation_errors attempt="{attempt}" max="2">
+The commands in your previous plan referenced resources that could not be
+found via the GCP API. Correct the resource names and flags listed below,
+then regenerate the full plan. Do not change steps that validated successfully.
 
 {errors}
-
-Regenerate the full plan correcting these errors. Do not change steps that
-validated successfully.
+</validation_errors>
 """
 
 
@@ -110,7 +161,7 @@ class PlanAgent:
         # Phase 2 — Configuration-specific plan generation (LLM) with
         #           Layer C retry loop (max 2 retries on dry-run failures)
         # ------------------------------------------------------------------- #
-        base_prompt = _PLAN_PROMPT.format(
+        base_data = _PLAN_DATA_TEMPLATE.format(
             preflight_json=budget_json(preflight_results, BUDGETS["preflight"], "preflight"),
             resource_data_json=budget_json(resource_data, BUDGETS["resource_data"], "resource_data"),
             finding_json=budget_json(finding, BUDGETS["finding"], "finding"),
@@ -122,15 +173,18 @@ class PlanAgent:
             dry_run=self.config.dry_run,
         )
 
-        prompt = base_prompt
+        data_message = base_data
         client = genai.Client()
         plan: dict = {}
 
         for attempt in range(3):  # attempt 0, 1, 2 — max 2 retries
             response = await client.aio.models.generate_content(
                 model=os.getenv("PLANNING_MODEL_ID", "gemini-2.5-pro"),
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
+                contents=data_message,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    system_instruction=_PLAN_SYSTEM_INSTRUCTION,
+                ),
             )
 
             plan = json.loads(response.text.strip())
@@ -175,9 +229,9 @@ class PlanAgent:
                 break  # All checks passed — plan is valid
 
             if attempt < 2:
-                # Augment prompt with errors and retry
+                # Augment data message with errors and retry
                 error_lines = "\n".join(f"- {e}" for e in dry_run_errors)
-                prompt = base_prompt + _DRY_RUN_RETRY_SUFFIX.format(
+                data_message = base_data + _DRY_RUN_RETRY_SUFFIX.format(
                     attempt=attempt + 1, errors=error_lines
                 )
                 plan["_dry_run_retry"] = attempt + 1
