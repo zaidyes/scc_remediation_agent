@@ -23,6 +23,7 @@ from google.genai import types
 from app.agents.preflight_agent import PreflightAgent
 from app.tools.agent_output import compact_impact_for_plan
 from app.tools.command_compiler import compile_plan as _compile_plan
+from app.tools.command_compiler import validate_rollback_steps as _validate_rollback
 from app.tools.context_budget import budget_json, budget_str, BUDGETS
 from config.schema import RemediationMode
 
@@ -211,14 +212,16 @@ class PlanAgent:
             # --------------------------------------------------------------- #
             # Layer B — Command compiler (static analysis on api_call strings)
             # --------------------------------------------------------------- #
-            compiler_result = _compile_plan(plan, finding)
-            if not compiler_result:
+            compiler_result  = _compile_plan(plan, finding)
+            rollback_result  = _validate_rollback(plan, finding)
+            if not compiler_result or not rollback_result:
+                all_violations = compiler_result.violations + rollback_result.violations
                 plan["status"] = "BLOCKED"
                 plan["block_reason"] = (
                     "Command compiler violations: "
-                    + "; ".join(compiler_result.violations)
+                    + "; ".join(all_violations)
                 )
-                plan["compiler_violations"] = compiler_result.violations
+                plan["compiler_violations"] = all_violations
                 break  # Compiler violations require human review — no retry
 
             # --------------------------------------------------------------- #

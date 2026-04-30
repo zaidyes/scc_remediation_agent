@@ -9,9 +9,47 @@ Rollback artifacts are available for 24 hours after execution.
 """
 import json
 import datetime
+import shlex
 import subprocess
 
 from google.cloud import compute_v1, firestore, storage
+
+
+# ---------------------------------------------------------------------------
+# Restore command whitelist
+# ---------------------------------------------------------------------------
+# Artifact restore_commands are constructed by our own code (not LLM), but
+# the artifact is stored in Firestore and could be tampered with.  Validating
+# the prefix before executing ensures a compromised record cannot run arbitrary
+# commands.  Uses shell=False so the command is never passed to a shell
+# interpreter — no injection via semicolons, pipes, or subshell $(…).
+
+_ALLOWED_RESTORE_PREFIXES = (
+    "gcloud compute disks create",                        # snapshot restore
+    "gcloud compute firewall-rules import",               # firewall config restore
+    "gcloud compute firewall-rules update",               # firewall rule restore
+    "gcloud projects add-iam-policy-binding",             # IAM binding restore
+    "gcloud organizations add-iam-policy-binding",
+    "gcloud resource-manager folders add-iam-policy-binding",
+    "gcloud iam service-accounts add-iam-policy-binding",
+    "gcloud projects set-iam-policy",                     # full policy file restore
+    "gh pr revert",                                       # Terraform PR rollback
+)
+
+
+def _validate_restore_command(restore_command: str) -> str | None:
+    """
+    Returns an error string if the restore_command is not on the whitelist,
+    or None if it is safe to execute.
+    """
+    normalised = " ".join(restore_command.split()).lower()
+    for prefix in _ALLOWED_RESTORE_PREFIXES:
+        if normalised.startswith(prefix.lower()):
+            return None
+    return (
+        f"restore_command '{restore_command[:80]}' is not in the permitted "
+        "rollback command whitelist — execution blocked."
+    )
 
 
 async def create_snapshot_artifact(
@@ -225,10 +263,23 @@ async def execute_rollback(approval_id: str) -> dict:
         return {"status": "FAILED", "output": "Rollback artifact has no restore_command",
                 "artifact": artifact}
 
+    # Validate against whitelist before executing — protects against a tampered
+    # Firestore artifact.  Also use shell=False so the command string is never
+    # interpreted by a shell (no semicolons, pipes, or subshell injection).
+    whitelist_error = _validate_restore_command(restore_command)
+    if whitelist_error:
+        return {"status": "FAILED", "output": whitelist_error, "artifact": artifact}
+
+    try:
+        args = shlex.split(restore_command)
+    except ValueError as e:
+        return {"status": "FAILED", "output": f"Could not parse restore_command: {e}",
+                "artifact": artifact}
+
     try:
         result = subprocess.run(
-            restore_command,
-            shell=True,
+            args,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=300,

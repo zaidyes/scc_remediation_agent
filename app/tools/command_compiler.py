@@ -6,10 +6,23 @@ Runs between plan_agent output and user presentation / approval dispatch.
 Zero LLM calls. Returns a CompilerResult that callers use to set
 plan["status"] = "BLOCKED" when violations are found.
 
-Three checks per api_call string:
-  1. Subcommand whitelist  — is this a known, permitted gcloud/terraform command?
-  2. Project scope         — does --project match the finding's project?
-  3. Destructive/expansion — does the command expand access or delete resources?
+Two public entry points:
+
+  compile_plan(plan, finding)
+      Validates plan["steps"] only — the forward remediation commands.
+      Checks: intent alignment, hard-blocked subcommands, IAM expansion,
+      firewall expansion, subcommand whitelist, project scope.
+
+  validate_rollback_steps(plan, finding)
+      Validates plan["rollback_steps"] with a separate, permissive whitelist
+      that allows inverse commands (e.g. add-iam-policy-binding to restore a
+      removed binding).  Also enforces a pairing check: each rollback command
+      must reference a resource that appears in a forward step.
+      Hard-blocked subcommands (deletion, destroy) are still blocked.
+
+Keeping the two validators separate is intentional: a command that is a
+violation in a forward step (adding an IAM binding) is the correct inverse
+action in a rollback step.
 """
 import re
 import shlex
@@ -121,6 +134,80 @@ _IAM_EXPANSION_PREFIXES = (
     "gcloud iam service-accounts add-iam-policy-binding",
 )
 
+# ---------------------------------------------------------------------------
+# Rollback-allowed commands per remediation type
+# ---------------------------------------------------------------------------
+# These are the logical inverses of the forward allowed commands.
+# add-iam-policy-binding is allowed here (blocked in forward steps) because
+# rollback for an IAM remediation must restore the binding that was removed.
+# Pairing validation (see validate_rollback_steps) ensures each command
+# targets a resource that was actually touched by a forward step.
+
+_ALLOWED_ROLLBACK: dict[str, tuple[str, ...]] = {
+    "IAM": (
+        "gcloud projects add-iam-policy-binding",
+        "gcloud organizations add-iam-policy-binding",
+        "gcloud resource-manager folders add-iam-policy-binding",
+        "gcloud iam service-accounts add-iam-policy-binding",
+        "gcloud projects set-iam-policy",          # restore from saved policy file
+    ),
+    "FIREWALL": (
+        "gcloud compute firewall-rules update",    # restore prior rule config
+        "gcloud compute firewall-rules import",    # import config saved to GCS
+    ),
+    "OS_PATCH": (
+        "gcloud compute disks create",             # restore disk from snapshot
+        "gcloud compute instances start",          # restart if stopped during patch
+    ),
+    "MISCONFIGURATION": (
+        "gcloud compute firewall-rules update",
+        "gcloud compute firewall-rules import",
+        "gcloud projects add-iam-policy-binding",
+        "gcloud organizations add-iam-policy-binding",
+        "gcloud storage buckets update",
+        "gcloud compute instances add-metadata",
+        "gcloud compute instances remove-metadata",
+        "gcloud compute ssl-policies update",
+        "gcloud compute target-https-proxies update",
+        "gcloud compute backend-services update",
+        "terraform apply",
+    ),
+}
+
+# Hard-blocked even in rollback context — deletion is never a valid restore
+_ROLLBACK_HARD_BLOCKED = (
+    "gcloud compute firewall-rules delete",
+    "gcloud compute instances delete",
+    "gcloud compute disks delete",
+    "gcloud compute networks delete",
+    "gcloud compute subnetworks delete",
+    "gcloud projects delete",
+    "gcloud organizations delete",
+    "gcloud iam service-accounts delete",
+    "gsutil rm -r",
+    "gsutil rm -ra",
+    "terraform destroy",
+    # Full org policy replacement — too broad even as rollback;
+    # use add-iam-policy-binding to restore specific bindings instead
+    "gcloud organizations set-iam-policy",
+)
+
+# Tokens that are gcloud subcommand keywords, not resource identifiers.
+# Used by _primary_resource_token to find the first real resource name in a cmd.
+_GCLOUD_KEYWORDS = frozenset({
+    "gcloud", "terraform", "gh",
+    "compute", "projects", "organizations", "iam", "resource-manager",
+    "folders", "storage", "firewall-rules", "instances", "service-accounts",
+    "os-config", "patch-jobs", "patch-deployments", "ssl-policies",
+    "target-https-proxies", "backend-services", "buckets", "disks",
+    "snapshots", "networks", "subnetworks",
+    "update", "create", "delete", "import", "export", "describe", "list",
+    "execute", "start", "apply", "plan", "show", "validate",
+    "add-iam-policy-binding", "remove-iam-policy-binding",
+    "set-iam-policy", "get-iam-policy",
+    "pr", "revert",
+})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -171,7 +258,8 @@ _FINDING_CLASS_TO_REMEDIATION_TYPE: dict[str, str] = {
 
 def compile_plan(plan: dict, finding: dict) -> CompilerResult:
     """
-    Validates every api_call in plan["steps"] and plan["rollback_steps"].
+    Validates every api_call in plan["steps"] (forward steps only).
+    Rollback steps are validated separately by validate_rollback_steps().
 
     Returns CompilerResult(passed=True) when all checks pass.
     Returns CompilerResult(passed=False, violations=[...]) on any failure.
@@ -196,9 +284,7 @@ def compile_plan(plan: dict, finding: dict) -> CompilerResult:
         # checks below would use the wrong allowed set.
         return CompilerResult(passed=False, violations=violations)
 
-    all_steps = list(plan.get("steps", [])) + list(plan.get("rollback_steps", []))
-
-    for step in all_steps:
+    for step in plan.get("steps", []):
         cmd = (step.get("api_call") or "").strip()
         if not cmd:
             continue
@@ -252,6 +338,105 @@ def compile_plan(plan: dict, finding: dict) -> CompilerResult:
                 violations.append(
                     f"Step {order}: command targets project '{cmd_project}' but the "
                     f"finding is in project '{finding_project}' — possible scope creep."
+                )
+
+    if violations:
+        return CompilerResult(passed=False, violations=violations)
+    return CompilerResult(passed=True)
+
+
+# ---------------------------------------------------------------------------
+# Rollback step validator
+# ---------------------------------------------------------------------------
+
+def _primary_resource_token(cmd: str) -> str | None:
+    """
+    Returns the first non-keyword, non-flag token from a gcloud/gh command —
+    typically the resource name (project ID, firewall rule name, instance name).
+
+    Used for pairing: verify a rollback command targets something that was
+    touched by a forward step.
+    """
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    for token in tokens:
+        if not token.startswith("-") and token not in _GCLOUD_KEYWORDS and len(token) >= 2:
+            return token
+    return None
+
+
+def validate_rollback_steps(plan: dict, finding: dict) -> CompilerResult:
+    """
+    Validates plan["rollback_steps"] with rollback-specific rules:
+
+      1. Hard-blocked subcommands — deletion and destroy are never valid
+      2. Rollback whitelist — only known inverse commands per remediation type
+      3. Project scope — --project must match the finding's project
+      4. Pairing check — each rollback command's primary resource token must
+         appear in at least one forward step's api_call (IAM and FIREWALL only)
+
+    Returns CompilerResult(passed=True) when all checks pass.
+    """
+    remediation_type  = plan.get("remediation_type", "MISCONFIGURATION")
+    resource_name     = plan.get("asset_name") or finding.get("resource_name", "")
+    finding_project   = _extract_project_from_resource(resource_name)
+    allowed_rollback  = _ALLOWED_ROLLBACK.get(remediation_type, ())
+    violations: list[str] = []
+
+    # Pre-compute forward step commands for pairing check
+    forward_cmds = " ".join(
+        (s.get("api_call") or "") for s in plan.get("steps", [])
+    )
+
+    for step in plan.get("rollback_steps", []):
+        cmd = (step.get("api_call") or "").strip()
+        if not cmd:
+            continue
+
+        order = step.get("order", "?")
+
+        # ── 1. Hard-blocked subcommands ───────────────────────────────────
+        if _starts_with_any(cmd, _ROLLBACK_HARD_BLOCKED):
+            violations.append(
+                f"Rollback step {order}: command '{cmd[:80]}' is hard-blocked — "
+                "deletion and full policy replacement are not valid rollback actions."
+            )
+            continue
+
+        # ── 2. Rollback whitelist ─────────────────────────────────────────
+        if cmd.startswith("gcloud") or cmd.startswith("terraform"):
+            is_readonly = _starts_with_any(cmd, _READONLY_PREFIXES)
+            is_allowed  = _starts_with_any(cmd, allowed_rollback)
+            if not is_readonly and not is_allowed:
+                allowed_hint = ", ".join(f"`{p}`" for p in allowed_rollback[:4])
+                violations.append(
+                    f"Rollback step {order}: command '{cmd[:80]}' is not in the permitted "
+                    f"rollback command list for {remediation_type}. "
+                    f"Allowed rollback commands: {allowed_hint}."
+                )
+                continue
+
+        # ── 3. Project scope ──────────────────────────────────────────────
+        if finding_project and cmd.startswith("gcloud"):
+            cmd_project = _extract_project_from_cmd(cmd)
+            if cmd_project and cmd_project != finding_project:
+                violations.append(
+                    f"Rollback step {order}: command targets project '{cmd_project}' but the "
+                    f"finding is in project '{finding_project}' — possible scope creep."
+                )
+
+        # ── 4. Pairing check (IAM and FIREWALL) ───────────────────────────
+        # For these types, the resource being restored should match a resource
+        # modified in the forward steps. OS_PATCH rollback restores a snapshot
+        # (different resource name by design) so pairing is skipped.
+        if remediation_type in ("IAM", "FIREWALL"):
+            resource_token = _primary_resource_token(cmd)
+            if resource_token and resource_token not in forward_cmds:
+                violations.append(
+                    f"Rollback step {order}: resource '{resource_token}' does not appear "
+                    "in any forward step — rollback command may reference an unrelated resource."
                 )
 
     if violations:
