@@ -306,6 +306,84 @@ Coverage: **batch path only**. Subprocess gcloud calls are not suitable inside a
 
 ---
 
+## Prompt Injection Defences
+
+SCC finding data originates from GCP APIs but can be influenced by anyone with write access to resource metadata, GCP labels, or custom SCC findings. A threat actor with that access could embed instruction-like text in `description`, `remediation_text`, `category`, or `source_properties` fields that would then be interpolated verbatim into the planning LLM prompt.
+
+Three structural defences address this, in order from data entry to post-generation validation:
+
+### Defence 1 — Field Sanitisation (at source)
+
+Location: `_sanitise()` in `app/tools/scc_tools.py`
+
+Applied to every string-valued finding field in `get_finding_detail()` before the data leaves the SCC layer:
+
+```python
+_INJECTION_RE = re.compile(
+    r"(^#{1,6}\s"   # Markdown section headers (## Instructions, etc.)
+    r"|^```"        # Code fence openers — can embed arbitrary blocks
+    r"|</[a-z])",   # XML closing tags — could escape <finding> data wrapper
+    re.MULTILINE | re.IGNORECASE,
+)
+```
+
+Fields sanitised: `category`, `description`, `remediation_text`, all string values in `source_properties`.
+
+The regex intentionally avoids stripping newlines or sentence punctuation — legitimate remediation guidance contains both.
+
+### Defence 2 — System / User Message Separation
+
+Location: `_PLAN_SYSTEM_INSTRUCTION` and `_PLAN_DATA_TEMPLATE` in `app/agents/plan_agent.py`
+
+The Gemini API separates `system_instruction` from `contents` (user message). The model weights instructions in `system_instruction` as more authoritative than content in `contents`. This means injected text embedded in a data field cannot override planning rules, even if it says "ignore previous instructions".
+
+```
+system_instruction  ← _PLAN_SYSTEM_INSTRUCTION
+                       Planning rules + JSON output schema
+                       No finding data, no resource data
+
+contents            ← _PLAN_DATA_TEMPLATE
+                       XML-tagged data only:
+                       <preflight>...</preflight>
+                       <resource_data>...</resource_data>
+                       <finding>...</finding>
+                       <blast_radius_and_impact>...</blast_radius_and_impact>
+                       <remediation_guidance>...</remediation_guidance>
+                       <customer_config>...</customer_config>
+```
+
+XML tags create explicit boundaries: injected text inside a `<finding>` tag cannot escape to the instruction level. The retry suffix also uses an XML tag (`<validation_errors>`) rather than a Markdown header to prevent the model from interpreting it as a new instruction section.
+
+### Defence 3 — Intent Alignment Check (Check 0 in Command Compiler)
+
+Location: `compile_plan()` in `app/tools/command_compiler.py`
+
+After the LLM produces a plan, Check 0 verifies that `plan.remediation_type` matches the `finding.finding_class` from the original finding:
+
+```
+finding_class    → expected remediation_type
+VULNERABILITY    → OS_PATCH
+MISCONFIGURATION → MISCONFIGURATION
+IAM_POLICY       → IAM
+NETWORK          → FIREWALL
+```
+
+A mismatch signals either a misrouted plan or that injected text redirected the model to a different action class. The check returns immediately before any per-type whitelist evaluation — using the wrong allowed command set on a mismatched plan would give the wrong security guarantees.
+
+This is the last line of defence: even if sanitisation and system/user separation were both bypassed, a prompt injection that changed the plan's `remediation_type` would still be caught here.
+
+### Coverage Summary
+
+| Defence | Where it runs | What it catches |
+|---------|--------------|-----------------|
+| Field sanitisation | `scc_tools.get_finding_detail()` | Markdown headers, code fences, XML closing tags in finding data |
+| System/user separation | `plan_agent.PlanAgent.generate()` | Injected instructions in data fields overriding planning rules |
+| Intent alignment | `command_compiler.compile_plan()` — Check 0 | Plans generated for the wrong finding class (wrong tool set applied) |
+
+All three defences are deterministic — no LLM calls, no embeddings, no external lookups.
+
+---
+
 ## Tool Pool Assembly
 
 Following the Claude Code harness pattern (arXiv 2604.14228): each agent receives only the tools relevant to its role and finding type.
