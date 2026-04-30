@@ -153,6 +153,45 @@ async def verify_jira_signature(request: Request, body: bytes) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Generic Google OIDC token verification (reusable)
+# ---------------------------------------------------------------------------
+
+async def verify_google_oidc_token(request: Request, audience_env: str) -> dict:
+    """
+    Verifies a Google-signed OIDC Bearer token and returns the claims dict.
+    The token audience must match the value of the given env var.
+
+    Raises HTTPException(500) if the audience env var is not set.
+    Raises HTTPException(401) if the token is missing or invalid.
+    """
+    audience = os.environ.get(audience_env, "")
+    if not audience:
+        raise HTTPException(
+            status_code=500,
+            detail=f"{audience_env} env var not configured",
+        )
+
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+
+    token = auth_header[len("Bearer "):]
+    try:
+        claims = id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            audience=audience,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Invalid token: {exc}",
+        ) from exc
+
+    return claims
+
+
+# ---------------------------------------------------------------------------
 # Cloud Tasks — OIDC token verification
 # ---------------------------------------------------------------------------
 # When a Cloud Tasks HTTP target is configured with an OIDC service account,

@@ -17,6 +17,7 @@ from google.cloud import firestore, tasks_v2
 
 from scheduler.webhook_auth import (
     verify_chat_jwt,
+    verify_google_oidc_token,
     verify_pagerduty_signature,
     verify_jira_signature,
     verify_cloud_tasks_token,
@@ -259,12 +260,53 @@ async def escalate(request: Request):
     return {"status": "escalated"}
 
 
+async def _authorise_rollback(caller_email: str, approval: dict, db) -> None:
+    """
+    Checks that caller_email is an authorised approver for the approval's
+    severity level.  Raises HTTPException(403) if not, HTTPException(500)
+    if the customer config cannot be loaded (fail closed — never skip the check).
+    """
+    customer_id = os.environ.get("CUSTOMER_ID", "")
+    config_doc = db.collection("configs").document(customer_id).get()
+    if not config_doc.exists:
+        raise HTTPException(status_code=500, detail="Customer config not found")
+
+    from config.schema import CustomerConfig
+    config = CustomerConfig(**config_doc.to_dict())
+    if not _is_valid_approver(caller_email, approval.get("severity", ""), config):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{caller_email} is not authorised to roll back "
+                   f"{approval.get('severity', 'this')} findings.",
+        )
+
+
 @app.post("/api/rollback/{approval_id}")
-async def rollback(approval_id: str):
+async def rollback(approval_id: str, request: Request):
     """
     Executes the stored rollback artifact for an approval.
     Available for 24 hours after execution.
+
+    Two-layer auth:
+      1. OIDC Bearer token — caller must be a known Google identity
+         (env: ROLLBACK_API_AUDIENCE)
+      2. Authorisation — caller email must be an authorised approver for
+         the approval's severity level (same check as the approval workflow).
+         Fails closed: if config cannot be loaded, the request is rejected.
     """
+    # Layer 1 — identity
+    claims = await verify_google_oidc_token(request, "ROLLBACK_API_AUDIENCE")
+    caller_email = claims.get("email", "")
+
+    # Layer 2 — authorisation
+    db = _get_db()
+    doc = db.collection("approvals").document(approval_id).get()
+    if not doc.exists:
+        raise HTTPException(status_code=404, detail="Approval not found")
+
+    approval = doc.to_dict()
+    await _authorise_rollback(caller_email, approval, db)
+
     from app.tools.rollback_tools import execute_rollback
     result = await execute_rollback(approval_id)
     if result["status"] == "FAILED":
