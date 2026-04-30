@@ -15,6 +15,13 @@ import datetime
 from fastapi import FastAPI, Request, HTTPException, Header
 from google.cloud import firestore, tasks_v2
 
+from scheduler.webhook_auth import (
+    verify_chat_jwt,
+    verify_pagerduty_signature,
+    verify_jira_signature,
+    verify_cloud_tasks_token,
+)
+
 app = FastAPI()
 _db = None
 
@@ -36,6 +43,7 @@ async def chat_webhook(request: Request):
     Receives interactive card action callbacks from Google Chat.
     Validates the approver, updates Firestore, and enqueues execution or deferral.
     """
+    await verify_chat_jwt(request)
     body = await request.json()
 
     action_name = body.get("action", {}).get("actionMethodName", "")
@@ -119,7 +127,9 @@ async def chat_webhook(request: Request):
 @app.post("/webhook/pagerduty")
 async def pagerduty_webhook(request: Request):
     """Receives PagerDuty webhook events for acknowledgment and resolution."""
-    body = await request.json()
+    raw = await request.body()
+    await verify_pagerduty_signature(request, raw)
+    body = json.loads(raw)
 
     for event in body.get("messages", []):
         event_type = event.get("type", "")
@@ -162,7 +172,9 @@ async def jira_webhook(request: Request):
     Receives Jira issue transition events.
     Maps issue comments APPROVED / REJECTED to approval decisions.
     """
-    body = await request.json()
+    raw = await request.body()
+    await verify_jira_signature(request, raw)
+    body = json.loads(raw)
 
     issue = body.get("issue", {})
     comment_body = body.get("comment", {}).get("body", "").strip().upper()
@@ -210,6 +222,7 @@ async def escalate(request: Request):
     Called by Cloud Tasks when an approval times out without a response.
     Escalates to fallback approvers.
     """
+    await verify_cloud_tasks_token(request)
     body = await request.json()
     approval_id = body.get("approval_id")
     if not approval_id:
@@ -266,6 +279,7 @@ async def reanalyse(request: Request):
     Re-runs the full analysis pipeline and creates a new approval record that
     supersedes the invalidated one.
     """
+    await verify_cloud_tasks_token(request)
     body = await request.json()
     finding_id = body.get("finding_id")
     supersedes_approval_id = body.get("supersedes_approval_id")
@@ -338,6 +352,7 @@ async def execute(request: Request):
     Called by Cloud Tasks to execute an approved remediation plan.
     Loads config, runs the plan, verifies closure.
     """
+    await verify_cloud_tasks_token(request)
     body = await request.json()
     approval_id = body.get("approval_id")
     plan = body.get("plan")
