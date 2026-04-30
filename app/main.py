@@ -9,6 +9,26 @@ import argparse
 import asyncio
 import os
 
+# ---------------------------------------------------------------------------
+# Pipeline concurrency cap
+# ---------------------------------------------------------------------------
+# Shared across all concurrent cycle invocations in the same process (e.g.
+# multiple Cloud Tasks messages delivered simultaneously).  Prevents a burst
+# of findings from saturating Gemini quota or spawning too many gcloud
+# subprocesses at once.  Set MAX_CONCURRENT_FINDINGS at deploy time;
+# the default of 5 is conservative enough for shared Gemini quotas.
+
+_MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT_FINDINGS", "5"))
+_pipeline_sem: asyncio.Semaphore | None = None
+
+
+def _get_pipeline_sem() -> asyncio.Semaphore:
+    """Lazily initialises the module-level semaphore (event-loop safe)."""
+    global _pipeline_sem
+    if _pipeline_sem is None:
+        _pipeline_sem = asyncio.Semaphore(_MAX_CONCURRENT)
+    return _pipeline_sem
+
 from google.cloud import firestore
 
 from app.agents.triage_agent import TriageAgent
@@ -35,14 +55,36 @@ async def run_remediation_cycle(config: CustomerConfig) -> None:
 
     triage = TriageAgent(config)
     prioritised_findings = await triage.run()
-    print(f"[triage] {len(prioritised_findings)} findings in scope after filtering")
+
+    max_per_cycle = config.execution.max_findings_per_cycle
+    if len(prioritised_findings) > max_per_cycle:
+        print(
+            f"[triage] {len(prioritised_findings)} findings returned; "
+            f"capping to {max_per_cycle} per cycle (max_findings_per_cycle)"
+        )
+        prioritised_findings = prioritised_findings[:max_per_cycle]
+    else:
+        print(f"[triage] {len(prioritised_findings)} findings in scope after filtering")
+
+    timeout_s = config.execution.finding_timeout_seconds
+    sem = _get_pipeline_sem()
 
     for finding in prioritised_findings:
         print(
             f"[finding] Processing {finding['finding_id']} "
             f"({finding['severity']}) on {finding['resource_name']}"
         )
-        await _process_finding(finding, config, policies)
+        async with sem:
+            try:
+                await asyncio.wait_for(
+                    _process_finding(finding, config, policies),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[cycle] Finding {finding['finding_id']} timed out after "
+                    f"{timeout_s}s — skipping and releasing semaphore slot"
+                )
 
 
 async def _process_finding(

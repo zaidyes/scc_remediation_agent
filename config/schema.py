@@ -99,6 +99,8 @@ class ExecutionConfig(BaseModel):
     max_blast_radius_for_auto: int = 5      # max downstream deps for auto-approve
     gitops_repo: Optional[str] = None       # for Terraform PR mode
     gitops_branch: str = "main"
+    max_findings_per_cycle: int = 20        # cap findings processed in one cycle
+    finding_timeout_seconds: float = 300.0  # per-finding processing timeout
 
 class NotificationConfig(BaseModel):
     google_chat_space: Optional[str] = None
