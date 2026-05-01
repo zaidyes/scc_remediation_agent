@@ -5,7 +5,7 @@ description: |
   Autonomous GCP security remediation agent. Ingests SCC findings,
   analyses blast radius via asset graph, generates remediation plans,
   and executes approved fixes using GCP-native APIs.
-author: your-org
+author: zaidyes
 category: security
 tags: [security, scc, remediation, gcp, vulnerability-management]
 
@@ -70,8 +70,8 @@ marketplace:
     thresholds, define approval chains, and control execution modes. The
     agent handles the rest. Dry-run mode is on by default — no changes
     are applied until the customer explicitly enables execution.
-  documentation_url: https://github.com/your-org/scc-remediation-agent#readme
-  support_url: https://github.com/your-org/scc-remediation-agent/issues
+  documentation_url: https://github.com/zaidyes/scc_remediation_agent#readme
+  support_url: https://github.com/zaidyes/scc_remediation_agent/issues
   required_permissions:
     - securitycenter.findings.list
     - securitycenter.findings.setMute

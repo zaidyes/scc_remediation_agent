@@ -135,8 +135,8 @@ To test against a real GCP org from your laptop without deploying anything, see 
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/your-org/scc-remediation-agent
-cd scc-remediation-agent
+git clone https://github.com/zaidyes/scc_remediation_agent
+cd scc_remediation_agent
 
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 # Edit terraform.tfvars — required: project_id, org_id, neo4j_password
