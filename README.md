@@ -126,7 +126,7 @@ To test against a real GCP org from your laptop without deploying anything, see 
 - `gcloud` CLI authenticated with org-level permissions
 - Terraform >= 1.5
 - `uv` — `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- agents-cli — `uvx google-agents-cli setup`
+- agents-cli — installed on demand via `uvx`; no separate install needed
 
 ---
 
@@ -138,16 +138,11 @@ To test against a real GCP org from your laptop without deploying anything, see 
 git clone https://github.com/zaidyes/scc_remediation_agent
 cd scc_remediation_agent
 
-# Install Python dependencies (including agents-cli) into a local venv
+# Install Python dependencies into a local venv
 uv sync --group dev
 
-# Authenticate agents-cli (one-time)
-uv run agents-cli setup
-
-# agents-cli scaffold wires pyproject.toml to the ADK entrypoint.
-# This repo already has the [tool.google-agents-cli] section committed,
-# so you only need to run this if you fork and rename the project:
-#   agents-cli scaffold
+# Authenticate agents-cli (one-time, opens browser)
+uvx google-agents-cli setup
 
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 # Edit terraform.tfvars — required: project_id, org_id, neo4j_password
@@ -184,12 +179,12 @@ python infrastructure/setup_log_sink.py --project-id YOUR_PROJECT_ID --org-id YO
 ### 4. Deploy the agent
 
 ```bash
-uv run agents-cli deploy
+uvx google-agents-cli deploy
 ```
 
 ### 5. Configure the agent
 
-Open the Config UI (URL printed by `agents-cli deploy`) and complete the setup wizard:
+Open the Config UI (URL printed by `uvx google-agents-cli deploy`) and complete the setup wizard:
 
 1. **Scope** — select projects or label-filtered assets to monitor
 2. **Severity** — set the minimum severity threshold
