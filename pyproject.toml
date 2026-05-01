@@ -34,6 +34,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["app", "config", "graph", "scheduler", "cli.py"]
 
+[tool.google-agents-cli]
+# Tells agents-cli which file contains root_agent (the ADK entrypoint).
+# This section is normally written by `agents-cli scaffold`; it is committed
+# here so the repo is deployable without running scaffold from scratch.
+entrypoint = "app/agent.py"
+
 [tool.uv.sources]
 # agents-cli is installed separately via: uvx google-agents-cli setup
 

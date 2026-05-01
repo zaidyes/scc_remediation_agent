@@ -132,11 +132,22 @@ To test against a real GCP org from your laptop without deploying anything, see 
 
 ## Quickstart
 
-### 1. Clone and configure
+### 1. Clone, install dependencies, and configure
 
 ```bash
 git clone https://github.com/zaidyes/scc_remediation_agent
 cd scc_remediation_agent
+
+# Install Python dependencies into a local venv
+uv sync
+
+# One-time agents-cli setup (downloads the CLI and authenticates it)
+uvx google-agents-cli setup
+
+# agents-cli scaffold wires pyproject.toml to the ADK entrypoint.
+# This repo already has the [tool.google-agents-cli] section committed,
+# so you only need to run this if you fork and rename the project:
+#   agents-cli scaffold
 
 cp terraform/terraform.tfvars.example terraform/terraform.tfvars
 # Edit terraform.tfvars — required: project_id, org_id, neo4j_password
@@ -173,7 +184,6 @@ python infrastructure/setup_log_sink.py --project-id YOUR_PROJECT_ID --org-id YO
 ### 4. Deploy the agent
 
 ```bash
-uvx google-agents-cli setup   # first time only
 agents-cli deploy
 ```
 
