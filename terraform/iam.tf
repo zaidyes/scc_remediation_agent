@@ -4,7 +4,7 @@ resource "google_service_account" "scc_agent_sa" {
   project      = var.project_id
 }
 
-# Organization-level roles
+# Organization-level roles (must be org-scoped resources)
 locals {
   org_roles = [
     "roles/securitycenter.findingsViewer",
@@ -13,8 +13,6 @@ locals {
     "roles/cloudasset.owner",
     "roles/iam.securityReviewer",
     "roles/networkmanagement.viewer",
-    "roles/osconfig.patchJobExecutor",
-    "roles/iam.roleViewer",
     "roles/logging.viewer",
     "roles/monitoring.viewer",
     # Cloud Logging org-level sink — required for infrastructure/setup_log_sink.py
@@ -30,12 +28,16 @@ resource "google_organization_iam_member" "agent_org_roles" {
 }
 
 # Project-level roles
+# roles/iam.roleViewer      — valid at project, not org scope
+# roles/osconfig.patchJobExecutor / patchJobViewer — project-scoped resources
 locals {
   project_roles = [
-    "roles/iam.securityAdmin", # Required if IAM tightening is enabled
+    "roles/iam.securityAdmin",            # Required if IAM tightening is enabled
+    "roles/iam.roleViewer",               # List available roles for IAM analysis
     "roles/compute.viewer",
-    "roles/osconfig.instanceViewer",
-    "roles/secretmanager.secretAccessor" # Needed to read Neo4j password
+    "roles/osconfig.patchJobExecutor",    # Create patch jobs
+    "roles/osconfig.patchJobViewer",      # Read patch job status
+    "roles/secretmanager.secretAccessor", # Read Neo4j password
   ]
 }
 

@@ -302,6 +302,14 @@ resource "google_cloud_run_v2_service" "event_processor" {
     google_project_service.enabled_services["run.googleapis.com"],
     google_secret_manager_secret_version.neo4j_password_version,
   ]
+
+  # The image is managed outside Terraform after initial deploy.
+  # Push the real image first, then update via:
+  #   gcloud run deploy scc-event-processor --image=IMAGE --region=REGION
+  # or set event_processor_image in tfvars and re-apply.
+  lifecycle {
+    ignore_changes = [template[0].containers[0].image]
+  }
 }
 
 # Allow the Pub/Sub invoker SA to call the event processor
