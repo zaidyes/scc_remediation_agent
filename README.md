@@ -170,10 +170,10 @@ This provisions:
 
 ```bash
 # Org-level Cloud Asset Inventory feeds → Pub/Sub
-python infrastructure/setup_feeds.py --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID
+uv run python infrastructure/setup_feeds.py --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID
 
 # Org-level Cloud Audit Log sink → audit-change-events topic
-python infrastructure/setup_log_sink.py --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID
+uv run python infrastructure/setup_log_sink.py --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID
 ```
 
 ### 4. Deploy the agent
