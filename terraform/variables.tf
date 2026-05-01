@@ -53,11 +53,13 @@ variable "scheduler_service_url" {
 variable "authorized_master_cidr_blocks" {
   description = <<-EOT
     CIDR blocks allowed to reach the GKE master API server.
-    Set to your corporate VPN or bastion CIDR(s) — do not leave this open to 0.0.0.0/0.
+    Defaults to [] (unrestricted) so the cluster deploys without extra config.
+    For production, set this to your corporate VPN or bastion CIDRs — do not leave open to 0.0.0.0/0.
     Example: [{ cidr_block = "10.0.0.0/8", display_name = "corporate-vpn" }]
   EOT
   type = list(object({
     cidr_block   = string
     display_name = string
   }))
+  default = []
 }

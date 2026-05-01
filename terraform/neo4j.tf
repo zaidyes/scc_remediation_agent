@@ -16,13 +16,18 @@ resource "google_container_cluster" "neo4j_cluster" {
   # VPC-native (alias IPs) — required for private clusters (tfsec #6)
   ip_allocation_policy {}
 
-  # Restrict which CIDRs can reach the Kubernetes API server (tfsec #2)
-  master_authorized_networks_config {
-    dynamic "cidr_blocks" {
-      for_each = var.authorized_master_cidr_blocks
-      content {
-        cidr_block   = cidr_blocks.value.cidr_block
-        display_name = cidr_blocks.value.display_name
+  # Restrict which CIDRs can reach the Kubernetes API server (tfsec #2).
+  # Block is omitted when the list is empty (unrestricted) rather than
+  # generating an empty config that would lock everyone out.
+  dynamic "master_authorized_networks_config" {
+    for_each = length(var.authorized_master_cidr_blocks) > 0 ? [1] : []
+    content {
+      dynamic "cidr_blocks" {
+        for_each = var.authorized_master_cidr_blocks
+        content {
+          cidr_block   = cidr_blocks.value.cidr_block
+          display_name = cidr_blocks.value.display_name
+        }
       }
     }
   }
