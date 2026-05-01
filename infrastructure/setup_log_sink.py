@@ -7,6 +7,8 @@ Run once during agent onboarding:
 """
 import argparse
 
+import google.auth
+import google.auth.impersonated_credentials
 from google.cloud import logging_v2
 from google.cloud.logging_v2.services.config_service_v2 import ConfigServiceV2Client
 from google.cloud.logging_v2.types import LogSink
@@ -38,8 +40,25 @@ OR (
 _SINK_NAME = "scc-agent-audit-events"
 
 
-def setup_log_sink(org_id: str, project_id: str, topic_name: str = "audit-change-events") -> None:
-    client = ConfigServiceV2Client()
+def _make_client(impersonate_sa: str | None) -> ConfigServiceV2Client:
+    if not impersonate_sa:
+        return ConfigServiceV2Client()
+    source, _ = google.auth.default()
+    creds = google.auth.impersonated_credentials.Credentials(
+        source_credentials=source,
+        target_principal=impersonate_sa,
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    return ConfigServiceV2Client(credentials=creds)
+
+
+def setup_log_sink(
+    org_id: str,
+    project_id: str,
+    topic_name: str = "audit-change-events",
+    impersonate_sa: str | None = None,
+) -> None:
+    client = _make_client(impersonate_sa)
     parent = f"organizations/{org_id}"
     destination = f"pubsub.googleapis.com/projects/{project_id}/topics/{topic_name}"
 
@@ -77,8 +96,8 @@ def setup_log_sink(org_id: str, project_id: str, topic_name: str = "audit-change
     print("Log sink setup complete.")
 
 
-def teardown_log_sink(org_id: str) -> None:
-    client = ConfigServiceV2Client()
+def teardown_log_sink(org_id: str, impersonate_sa: str | None = None) -> None:
+    client = _make_client(impersonate_sa)
     try:
         client.delete_sink(sink_name=f"organizations/{org_id}/sinks/{_SINK_NAME}")
         print(f"  [deleted] {_SINK_NAME}")
@@ -92,9 +111,16 @@ if __name__ == "__main__":
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--topic", default="audit-change-events")
     parser.add_argument("--teardown", action="store_true")
+    parser.add_argument(
+        "--impersonate-service-account",
+        metavar="SA_EMAIL",
+        default=None,
+        help="Run as this service account (e.g. scc-remediation-agent@PROJECT.iam.gserviceaccount.com). "
+             "Your ADC must have roles/iam.serviceAccountTokenCreator on the SA.",
+    )
     args = parser.parse_args()
 
     if args.teardown:
-        teardown_log_sink(args.org_id)
+        teardown_log_sink(args.org_id, args.impersonate_service_account)
     else:
-        setup_log_sink(args.org_id, args.project_id, args.topic)
+        setup_log_sink(args.org_id, args.project_id, args.topic, args.impersonate_service_account)

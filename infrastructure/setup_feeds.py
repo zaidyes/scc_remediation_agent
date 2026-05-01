@@ -9,6 +9,9 @@ The event processor (graph/events/processor.py) handles the messages.
 """
 import argparse
 
+import google.auth
+import google.auth.impersonated_credentials
+import google.auth.transport.requests
 from google.cloud import asset_v1
 
 # Asset types monitored for resource and IAM changes
@@ -67,8 +70,25 @@ _FEEDS = [
 ]
 
 
-def setup_feeds(org_id: str, project_id: str, topic_name: str = "asset-change-events") -> None:
-    client = asset_v1.AssetServiceClient()
+def _make_client(impersonate_sa: str | None) -> asset_v1.AssetServiceClient:
+    if not impersonate_sa:
+        return asset_v1.AssetServiceClient()
+    source, _ = google.auth.default()
+    creds = google.auth.impersonated_credentials.Credentials(
+        source_credentials=source,
+        target_principal=impersonate_sa,
+        target_scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    return asset_v1.AssetServiceClient(credentials=creds)
+
+
+def setup_feeds(
+    org_id: str,
+    project_id: str,
+    topic_name: str = "asset-change-events",
+    impersonate_sa: str | None = None,
+) -> None:
+    client = _make_client(impersonate_sa)
     parent = f"organizations/{org_id}"
     topic = f"projects/{project_id}/topics/{topic_name}"
 
@@ -104,9 +124,9 @@ def setup_feeds(org_id: str, project_id: str, topic_name: str = "asset-change-ev
     print("Feed setup complete.")
 
 
-def teardown_feeds(org_id: str) -> None:
+def teardown_feeds(org_id: str, impersonate_sa: str | None = None) -> None:
     """Removes all three feeds. Use during offboarding."""
-    client = asset_v1.AssetServiceClient()
+    client = _make_client(impersonate_sa)
     parent = f"organizations/{org_id}"
 
     for feed_def in _FEEDS:
@@ -124,9 +144,16 @@ if __name__ == "__main__":
     parser.add_argument("--project-id", required=True, help="Project that hosts the Pub/Sub topic")
     parser.add_argument("--topic", default="asset-change-events")
     parser.add_argument("--teardown", action="store_true", help="Remove feeds instead of creating")
+    parser.add_argument(
+        "--impersonate-service-account",
+        metavar="SA_EMAIL",
+        default=None,
+        help="Run as this service account (e.g. scc-remediation-agent@PROJECT.iam.gserviceaccount.com). "
+             "Your ADC must have roles/iam.serviceAccountTokenCreator on the SA.",
+    )
     args = parser.parse_args()
 
     if args.teardown:
-        teardown_feeds(args.org_id)
+        teardown_feeds(args.org_id, args.impersonate_service_account)
     else:
-        setup_feeds(args.org_id, args.project_id, args.topic)
+        setup_feeds(args.org_id, args.project_id, args.topic, args.impersonate_service_account)

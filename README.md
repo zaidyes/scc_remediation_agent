@@ -168,12 +168,22 @@ This provisions:
 
 ### 3. Set up CAI feeds and log sink
 
+Both scripts require org-level IAM permissions (`cloudasset.owner`, `logging.configWriter`).
+If your personal account lacks these, pass `--impersonate-service-account` to run as the
+Terraform-provisioned SA (requires `roles/iam.serviceAccountTokenCreator` on the SA).
+
 ```bash
+SA=scc-remediation-agent@YOUR_PROJECT_ID.iam.gserviceaccount.com
+
 # Org-level Cloud Asset Inventory feeds → Pub/Sub
-uv run python infrastructure/setup_feeds.py --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID
+uv run python infrastructure/setup_feeds.py \
+  --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID \
+  --impersonate-service-account $SA
 
 # Org-level Cloud Audit Log sink → audit-change-events topic
-uv run python infrastructure/setup_log_sink.py --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID
+uv run python infrastructure/setup_log_sink.py \
+  --project-id YOUR_PROJECT_ID --org-id YOUR_ORG_ID \
+  --impersonate-service-account $SA
 ```
 
 ### 4. Deploy the agent
