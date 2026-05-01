@@ -140,11 +140,13 @@ resource "google_service_account" "event_processor_invoker_sa" {
   project      = var.project_id
 }
 
-# Grant Pub/Sub permission to generate tokens for the invoker SA
-resource "google_project_iam_member" "pubsub_token_creator" {
-  project = var.project_id
-  role    = "roles/iam.serviceAccountTokenCreator"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+# Grant Pub/Sub permission to generate tokens for the invoker SA only (tfsec #4).
+# Scoped to the specific SA rather than project-level to prevent impersonation of
+# any other SA in the project.
+resource "google_service_account_iam_member" "pubsub_token_creator" {
+  service_account_id = google_service_account.event_processor_invoker_sa.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
 data "google_project" "project" {
