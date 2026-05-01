@@ -40,11 +40,12 @@ _IAM_ASSET_TYPES = [
     "iam.googleapis.com/ServiceAccount",
 ]
 
-# Relationship types with the highest signal for remediation safety
+# Asset types that support RELATIONSHIP content type.
+# compute.googleapis.com/Network and Subnetwork do NOT support RELATIONSHIP
+# feeds — the CAI API returns INVALID_ARGUMENT if they are included.
+# See: https://cloud.google.com/asset-inventory/docs/supported-asset-types
 _RELATIONSHIP_ASSET_TYPES = [
     "compute.googleapis.com/Instance",
-    "compute.googleapis.com/Network",
-    "compute.googleapis.com/Subnetwork",
     "container.googleapis.com/Cluster",
 ]
 
