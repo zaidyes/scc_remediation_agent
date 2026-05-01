@@ -39,9 +39,14 @@ variable "neo4j_bolt_uri" {
 }
 
 variable "event_processor_image" {
-  description = "Docker image URI for the event processor Cloud Run service"
-  type        = string
-  default     = "gcr.io/PROJECT_ID/scc-event-processor:latest"
+  description = <<-EOT
+    Docker image URI for the event processor Cloud Run service.
+    Defaults to a Cloud Run hello-world image so infrastructure deploys before
+    the app image is built. Override with your real image after pushing it:
+      us-docker.pkg.dev/YOUR_PROJECT/scc/scc-event-processor:latest
+  EOT
+  type    = string
+  default = "us-docker.pkg.dev/cloudrun/container/hello:latest"
 }
 
 variable "scheduler_service_url" {

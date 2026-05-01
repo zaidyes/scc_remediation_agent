@@ -46,13 +46,23 @@ resource "google_project_iam_member" "agent_project_roles" {
   member   = "serviceAccount:${google_service_account.scc_agent_sa.email}"
 }
 
+# Provision the CAI service agent explicitly. The agent SA is only created
+# by GCP after the API is enabled; without this resource Terraform tries to
+# grant IAM before the SA exists and gets a 400.
+resource "google_project_service_identity" "cai_sa" {
+  provider   = google-beta
+  project    = var.project_id
+  service    = "cloudasset.googleapis.com"
+  depends_on = [google_project_service.enabled_services["cloudasset.googleapis.com"]]
+}
+
 # Grant the Cloud Asset Inventory service agent publish rights on the
 # asset-change-events topic so CAI feeds can deliver messages.
 resource "google_pubsub_topic_iam_member" "cai_publisher" {
   project = var.project_id
   topic   = "asset-change-events"
   role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:service-${data.google_project.project.number}@gcp-sa-cloudasset.iam.gserviceaccount.com"
+  member  = "serviceAccount:${google_project_service_identity.cai_sa.email}"
 }
 
 # Agent SA: enqueue Cloud Tasks for escalation and execution
