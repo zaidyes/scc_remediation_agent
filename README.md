@@ -138,11 +138,11 @@ To test against a real GCP org from your laptop without deploying anything, see 
 git clone https://github.com/zaidyes/scc_remediation_agent
 cd scc_remediation_agent
 
-# Install Python dependencies into a local venv
-uv sync
+# Install Python dependencies (including agents-cli) into a local venv
+uv sync --group dev
 
-# One-time agents-cli setup (downloads the CLI and authenticates it)
-uvx google-agents-cli setup
+# Authenticate agents-cli (one-time)
+uv run agents-cli setup
 
 # agents-cli scaffold wires pyproject.toml to the ADK entrypoint.
 # This repo already has the [tool.google-agents-cli] section committed,
@@ -184,7 +184,7 @@ python infrastructure/setup_log_sink.py --project-id YOUR_PROJECT_ID --org-id YO
 ### 4. Deploy the agent
 
 ```bash
-agents-cli deploy
+uv run agents-cli deploy
 ```
 
 ### 5. Configure the agent
